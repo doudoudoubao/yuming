@@ -1,0 +1,19 @@
+services:
+  domain-monitor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: domain-monitor:latest
+    container_name: domain-monitor
+    restart: unless-stopped
+    volumes:
+      # 把 config.yaml 和 SQLite 数据都放在宿主机的 ./data 里
+      - ./data:/data
+    environment:
+      # 密钥统一从宿主机环境或 .env 文件注入，不要写进 config.yaml
+      TG_BOT_TOKEN: "${TG_BOT_TOKEN}"
+      TG_CHAT_ID: "${TG_CHAT_ID}"
+      NAMESILO_API_KEY: "${NAMESILO_API_KEY:-}"
+      DYNADOT_API_KEY: "${DYNADOT_API_KEY:-}"
+      ALIYUN_AK: "${ALIYUN_AK:-}"
+      ALIYUN_SK: "${ALIYUN_SK:-}"

@@ -1,0 +1,43 @@
+# 安装：
+#   sudo cp deploy/domain-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now domain-monitor
+#   journalctl -u domain-monitor -f
+[Unit]
+Description=域名监控与自动抢注
+Documentation=https://github.com/doudoudoubao/yuming
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=domain-monitor
+Group=domain-monitor
+WorkingDirectory=/opt/domain-monitor
+
+# 密钥放这个文件里（chmod 600），不要写进 config.yaml
+# 格式：TG_BOT_TOKEN=xxx  每行一个
+EnvironmentFile=-/etc/domain-monitor/secrets.env
+ExecStart=/opt/domain-monitor/.venv/bin/python -m domain_monitor -c /opt/domain-monitor/config.yaml run
+
+Restart=always
+RestartSec=10
+# 抢注期间被 OOM 杀掉的代价很大，降低被选中的概率
+OOMScoreAdjust=-500
+
+# 沙箱化
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/domain-monitor/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
