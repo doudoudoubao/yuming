@@ -257,7 +257,8 @@ async def test_plain_text_without_domain_gets_hint():
     assert "没认出域名" in recorder.sent[0]["text"]
 
 
-async def test_plain_text_reports_unrecognized_tokens():
+async def test_mixed_content_is_not_auto_added():
+    """消息里混了别的内容时不擅自替用户决定，只给出确认用的命令。"""
     recorder = Recorder()
     config, client = make_client(recorder)
     controller = StubController()
@@ -265,17 +266,80 @@ async def test_plain_text_reports_unrecognized_tokens():
 
     await bot._dispatch(make_message("good.com 不是域名"))
 
-    assert controller.calls == [("add", ("good.com",))]
-    assert "忽略了无法识别的内容" in recorder.sent[0]["text"]
+    assert controller.calls == []
+    assert "/add good.com" in recorder.sent[0]["text"]
 
 
-async def test_unauthorized_plain_text_still_rejected():
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://github.com/anthropics/claude-code",   # 网址不该被剥成 github.com
+        "看看 https://example.com/x 这个",
+        "user@example.com",
+        "example.com:8080",
+    ],
+)
+async def test_urls_are_never_auto_added(text):
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message(text))
+
+    assert controller.calls == []
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["token.io", "apikey.com", "mysecret.com", "password-manager.io",
+     "my-super-long-brand-2026.com"],
+)
+async def test_credential_looking_domains_are_still_added(domain):
+    """字面像密钥但确实是合法域名的，必须能正常加入监控。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message(domain))
+
+    assert controller.calls == [("add", (domain,))]
+
+
+async def test_chinese_full_stop_separator():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("a.com。b.net"))
+
+    assert controller.calls == [("add", ("a.com", "b.net"))]
+
+
+async def test_unauthorized_plain_text_is_silently_ignored():
+    """机器人待在群里时，不能把每一句闲聊都回一遍「未授权」。"""
     recorder = Recorder()
     config, client = make_client(recorder, allowed_user_ids=[999])
     controller = StubController()
     bot = TelegramBot(client, config, controller)
 
     await bot._dispatch(make_message("example.com", user_id=1))
+    await bot._dispatch(make_message("今天天气不错", user_id=1))
+
+    assert controller.calls == []
+    assert recorder.sent == []          # 完全沉默
+
+
+async def test_unauthorized_command_still_gets_one_reply():
+    """明确发命令的人应该被告知为什么没反应。"""
+    recorder = Recorder()
+    config, client = make_client(recorder, allowed_user_ids=[999])
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("/list", user_id=1))
 
     assert controller.calls == []
     assert "未授权" in recorder.sent[0]["text"]

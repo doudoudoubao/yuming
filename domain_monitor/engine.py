@@ -269,10 +269,15 @@ class Engine:
     ) -> bool:
         """判断这次「可注册」是真的，还是一次查询抖动。
 
-        域名走完删除流程掉出来是预期内的，直接信；
-        但一个还在正常注册期的域名突然 404，更像是 RDAP 服务器抽风、
-        或者我们问错了服务器（兜底入口对不认识的后缀也可能回 404）。
-        这种情况复核一次再当真——代价是几秒钟，换掉一次误报和一次白跑的下单。
+        预期内的掉落（走完删除流程、或我们已经预测到它该掉了）直接采信，
+        一秒都不耽误。只有「一个看起来还健康的域名突然 404」才复核一次——
+        这种更像是 RDAP 服务器临时抽风。
+
+        复核只能识别**间歇性**的假 404：复核时服务器明确说「还注册着」才算证伪。
+        如果复核请求本身也失败，什么都证明不了，那就采信第一次读数继续走。
+
+        注意：后缀路由错误（兜底入口不认识某个后缀而直接回 404）不归这里管，
+        它在 RDAP 层就被拦成「查询失败」了，根本不会走到这个函数。
         """
         if not self.config.rdap.reverify_available:
             return True
@@ -286,6 +291,19 @@ class Engine:
         ):
             return True
 
+        # 有些注册局根本不在 RDAP 里公布 redemption / pendingDelete，域名会从
+        # 「已注册」直接消失。只要我们**预测到**它该掉了，就同样按预期处理，
+        # 否则真正该抢的那一刻反而要多等一个复核往返。
+        if watched.phase in (Phase.NEAR, Phase.SPRINT):
+            return True
+        now = utcnow()
+        if watched.drop_at is not None and (
+            to_utc(watched.drop_at) - now
+        ).total_seconds() <= self.config.poll.watch_lead:
+            return True
+        if watched.expires_at is not None and to_utc(watched.expires_at) < now:
+            return True
+
         delay = max(0.0, self.config.rdap.reverify_delay)
         logger.warning(
             "%s 从「%s」直接跳到「可注册」，可疑，%.0fs 后复核一次",
@@ -297,6 +315,20 @@ class Engine:
         second = await self.rdap.lookup(watched.domain)
         if second.state == DomainState.AVAILABLE:
             logger.warning("%s 复核确认可注册", watched.domain)
+            return True
+
+        if second.state == DomainState.ERROR:
+            # 复核请求本身失败，什么也证明不了。这里必须采信第一次读数继续走：
+            # 误报的代价是一次被注册商驳回的下单，漏掉真实掉落的代价是域名没了。
+            message = (
+                f"复核请求失败（{second.error}），无法证伪，"
+                f"按第一次读数继续处理"
+            )
+            logger.warning("%s %s", watched.domain, message)
+            self.storage.add_event(
+                "reverify_inconclusive", domain=watched.domain,
+                message=message, level="warning",
+            )
             return True
 
         message = (

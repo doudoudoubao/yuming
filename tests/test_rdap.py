@@ -154,3 +154,58 @@ async def test_bootstrap_cached_to_disk(tmp_path, rdap_server):
     )
     assert await second.server_for("a.com") == "https://rdap.verisign.com/com/v1/"
     assert fetches["n"] == 1
+
+
+async def test_fallback_direct_404_is_not_available():
+    """兜底入口自己不认识这个后缀时的 404，只说明「它查不到」。
+
+    不知道权威服务器在哪却断言「可注册」，是最危险的一种误报。
+    """
+    def handler(request):
+        if "dns.json" in str(request.url):
+            return httpx.Response(200, json={"services": [[["com"], ["https://v/"]]]})
+        return httpx.Response(404)
+
+    client = RdapClient(
+        RdapConfig(rps_per_host=1000, max_retries=0, fallback_service="https://rdap.org/"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    status = await client.lookup("x.unknowntld")
+
+    assert status.state is DomainState.ERROR
+    assert status.state is not DomainState.AVAILABLE
+    assert "无法确认" in (status.error or "")
+
+
+async def test_fallback_404_after_redirect_is_trusted():
+    """兜底入口跳转到真实 RDAP 服务器后返回的 404 是可信的。"""
+    def handler(request):
+        url = str(request.url)
+        if "dns.json" in url:
+            return httpx.Response(200, json={"services": [[["com"], ["https://v/"]]]})
+        if "rdap.org" in url:
+            return httpx.Response(302, headers={"Location": "https://real.example/domain/x.co"})
+        return httpx.Response(404)
+
+    client = RdapClient(
+        RdapConfig(rps_per_host=1000, max_retries=0, fallback_service="https://rdap.org/"),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=True
+        ),
+    )
+    assert (await client.lookup("x.unknowntld")).state is DomainState.AVAILABLE
+
+
+async def test_bootstrap_matched_404_still_means_available(rdap_server, rdap_client):
+    """正常路径不受影响：权威服务器说 404 就是可注册。"""
+    rdap_server.set("free.com", None)
+    client = RdapClient(RdapConfig(rps_per_host=1000), client=rdap_client)
+    assert (await client.lookup("free.com")).state is DomainState.AVAILABLE
+
+
+async def test_resolve_server_reports_fallback_usage(rdap_client):
+    client = RdapClient(RdapConfig(fallback_service="https://rdap.org/"), client=rdap_client)
+    server, via_fallback = await client.resolve_server("a.com")
+    assert via_fallback is False and "verisign" in server
+    server, via_fallback = await client.resolve_server("a.unknowntld")
+    assert via_fallback is True and server == "https://rdap.org/"

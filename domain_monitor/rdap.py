@@ -23,7 +23,7 @@ import httpx
 
 from .config import RdapConfig
 from .models import DomainState, DomainStatus, classify_statuses
-from .utils import Backoff, TokenBucket, parse_datetime, suffixes_of, utcnow
+from .utils import Backoff, TokenBucket, parse_datetime, suffixes_of, tld_of, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -162,24 +162,33 @@ class RdapClient:
             logger.info("RDAP bootstrap 已加载，覆盖 %d 个后缀", len(services))
             return self._services
 
-    async def server_for(self, domain: str) -> str | None:
-        """按最长后缀匹配找 RDAP 服务器，overrides 优先。"""
+    async def resolve_server(self, domain: str) -> tuple[str | None, bool]:
+        """定位 RDAP 服务器。
+
+        返回 ``(地址, 是否走了兜底)``。走兜底意味着我们**并不知道**该后缀的
+        权威服务器在哪，这直接影响 404 该怎么解读——见 :meth:`_lookup`。
+        """
         candidates = suffixes_of(domain)
         for suffix in candidates:
             override = self.config.overrides.get(suffix)
             if override:
-                return override.rstrip("/") + "/"
+                return override.rstrip("/") + "/", False
 
         services = await self._load_bootstrap()
         for suffix in candidates:
             url = services.get(suffix)
             if url:
-                return url.rstrip("/") + "/"
+                return url.rstrip("/") + "/", False
 
         # 最后兜底：rdap.org 这类聚合入口会替我们做 302 跳转
         if self.config.fallback_service:
-            return self.config.fallback_service.rstrip("/") + "/"
-        return None
+            return self.config.fallback_service.rstrip("/") + "/", True
+        return None, False
+
+    async def server_for(self, domain: str) -> str | None:
+        """按最长后缀匹配找 RDAP 服务器，overrides 优先。"""
+        server, _ = await self.resolve_server(domain)
+        return server
 
     # -------------------------------------------------------------------- 限速
 
@@ -208,7 +217,7 @@ class RdapClient:
             return DomainStatus(domain=domain, state=DomainState.ERROR, error=str(exc))
 
     async def _lookup(self, domain: str) -> DomainStatus:
-        server = await self.server_for(domain)
+        server, via_fallback = await self.resolve_server(domain)
         if server is None:
             raise RdapError(f"找不到 {domain} 对应的 RDAP 服务器（该后缀可能不支持 RDAP）",
                             retryable=False)
@@ -230,6 +239,16 @@ class RdapClient:
 
             if response.status_code == 404:
                 backoff.reset()
+                # 走兜底入口且**没有发生跳转**，说明聚合服务自己就不认识这个后缀，
+                # 这个 404 只代表「它查不到」，不代表域名没被注册。
+                # 不知道权威服务器在哪就断言可注册，是最危险的一种误报。
+                if via_fallback and not response.history:
+                    raise RdapError(
+                        f"兜底入口未能定位 .{tld_of(domain)} 的 RDAP 服务器"
+                        f"（直接返回 404），无法确认是否可注册；"
+                        f"请在 rdap.overrides 里手动指定该后缀的服务器",
+                        retryable=False,
+                    )
                 return DomainStatus(domain=domain, state=DomainState.AVAILABLE, source="rdap")
 
             if response.status_code == 200:

@@ -881,3 +881,80 @@ async def test_reverification_can_be_disabled(rdap_server, storage):
     await engine.run_once()
 
     assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+
+
+async def test_inconclusive_recheck_does_not_discard_a_real_drop(rdap_server, storage):
+    """复核请求本身失败什么也证明不了，绝不能当成「确认是误报」。
+
+    误报的代价是一次被注册商驳回的下单；漏掉真实掉落的代价是域名永远没了。
+    """
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 0, "max_retries": 0},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+    rdap_server.set("target.com", rdap_payload())
+    await engine.run_once()
+
+    calls = {"n": 0}
+
+    def dropped_then_broken(request):
+        if "/domain/target.com" in str(request.url):
+            calls["n"] += 1
+            # 第一次：域名真的掉了；第二次（复核）：服务器挂了
+            return httpx.Response(404) if calls["n"] == 1 else httpx.Response(500)
+        return rdap_server.handler(request)
+
+    engine.rdap = RdapClient(
+        engine.config.rdap,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(dropped_then_broken)),
+    )
+    storage.update_domain("target.com", next_check_at=utcnow() - timedelta(seconds=1))
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+    assert "reverify_inconclusive" in [e.kind for e in storage.recent_events(20)]
+
+
+async def test_predicted_drop_skips_reverification(rdap_server, storage):
+    """有些注册局不在 RDAP 里公布 pendingDelete，域名会从「已注册」直接消失。
+
+    只要我们预测到它该掉了，就不该再浪费一个复核往返。
+    """
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 30},   # 真复核会卡 30 秒
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+    storage.update_domain(
+        "target.com",
+        state=DomainState.REGISTERED,                 # 观测到的状态一直是「已注册」
+        drop_at=utcnow() + timedelta(hours=1),        # 但我们预测它一小时内会掉
+    )
+    rdap_server.set("target.com", None)
+
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+
+
+async def test_expired_domain_skips_reverification(rdap_server, storage):
+    """已经过了到期日的域名消失属于预期内。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 30},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+    storage.update_domain(
+        "target.com",
+        state=DomainState.REGISTERED,
+        expires_at=utcnow() - timedelta(days=80),
+    )
+    rdap_server.set("target.com", None)
+
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED

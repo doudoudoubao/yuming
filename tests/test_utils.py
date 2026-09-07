@@ -158,3 +158,38 @@ def test_display_width_counts_cjk_as_two():
     assert display_width(pad("待删除", 12)) == 12
     assert display_width(pad("expired", 12)) == 12
     assert pad("toolongvalue", 4) == "toolongvalue"   # 超宽不截断
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("example.com。", "example.com"),   # 中文句号是合法标签分隔符，IDNA 会转成点
+        ("example.com.", "example.com"),
+        ("中文。com", "xn--fiq228c.com"),
+        ("例え.テスト", "xn--r8jz45g.xn--zckzah"),
+    ],
+)
+def test_normalize_strips_trailing_dot_after_idna(raw, expected):
+    """去尾点必须在 IDNA 之后，否则中文句号会留下 'example.com.' 这种残留。"""
+    assert normalize_domain(raw) == expected
+    assert is_valid_domain(normalize_domain(raw))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "例子.中国",      # 中文后缀
+        "公司.公司",
+        "shop.在线",
+        "сайт.рф",       # 西里尔后缀
+        "例え.テスト",     # 日文后缀
+    ],
+)
+def test_internationalized_tlds_are_valid(raw):
+    """国际化后缀 punycode 后带数字（.中国 -> xn--fiqs8s），不能被后缀正则挡掉。"""
+    assert is_valid_domain(normalize_domain(raw))
+
+
+@pytest.mark.parametrize("raw", ["no-tld", "-bad.com", "bad-.com", "x.c0m", "a.", ""])
+def test_invalid_domains_still_rejected_after_idn_support(raw):
+    assert not is_valid_domain(normalize_domain(raw))

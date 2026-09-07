@@ -320,11 +320,14 @@ class TelegramBot:
 
         if not self._authorized(chat_id, user_id):
             logger.warning("忽略未授权的 Telegram 消息 chat=%s user=%s", chat_id, user_id)
-            await self.client.send(
-                "⛔️ 未授权。请把你的 user id 加入配置的 telegram.allowed_user_ids。\n"
-                f"你的 user id: <code>{escape_html(user_id)}</code>",
-                chat_id=chat_id,
-            )
+            # 只对明确的命令回一句「未授权」。普通聊天一律沉默——
+            # 否则机器人待在群里会把每一句闲聊都回一遍。
+            if text.startswith("/"):
+                await self.client.send(
+                    "⛔️ 未授权。请把你的 user id 加入配置的 telegram.allowed_user_ids。\n"
+                    f"你的 user id: <code>{escape_html(user_id)}</code>",
+                    chat_id=chat_id,
+                )
             return
 
         if text.startswith("/"):
@@ -385,6 +388,15 @@ class TelegramBot:
         顺带拦一道凭据泄露——用户很容易顺手把 API Key 粘进聊天框，
         而抢注**从来不需要**通过 Telegram 传任何账号或密钥。
         """
+        tokens = [item for item in _SEPARATORS.split(text) if item]
+        # 先按「域名清单」解析。全部是裸域名才自动加监控——
+        # 这既避免了从聊天里的网址/散句误提取域名，也让 token.io、apikey.com
+        # 这类**合法但字面像密钥**的域名不会被下面的凭据检查拦掉。
+        if tokens and len(tokens) <= 20 and all(_is_bare_domain(item) for item in tokens):
+            return await self.controller.cmd_add(
+                [normalize_domain(item) for item in tokens]
+            )
+
         if _looks_like_secret(text):
             # 注意：绝不把可疑内容写进日志或回显到消息里
             logger.warning("收到疑似凭据的消息，已拒绝处理（内容未记录）")
@@ -396,26 +408,20 @@ class TelegramBot:
                 "并删除这条消息。"
             )
 
-        tokens = [item for item in re.split(r"[\s,;，、]+", text) if item]
-        domains, rejected = [], []
-        for token in tokens[:20]:
-            name = normalize_domain(token)
-            (domains if is_valid_domain(name) else rejected).append(token)
-
-        if not domains:
-            return (
-                "没认出域名。直接把域名发给我就能加入监控，例如：\n"
-                "<code>example.com</code>\n"
-                "<code>a.com b.net c.io</code>\n\n"
-                "或者发 /help 查看全部命令。"
+        maybe = [item for item in tokens if _is_bare_domain(item)][:5]
+        hint = (
+            "没认出域名。直接把域名发给我就能加入监控（整条消息只放域名），例如：\n"
+            "<code>example.com</code>\n"
+            "<code>a.com b.net c.io</code>\n\n"
+            "或者发 /help 查看全部命令。"
+        )
+        if maybe:
+            # 消息里混了别的内容，不擅自替用户决定加哪个，给出明确命令让他确认
+            hint = (
+                "消息里还有别的内容，没有自动添加。如果你要加这些域名，发：\n"
+                f"<code>/add {escape_html(' '.join(maybe))}</code>"
             )
-
-        reply = await self.controller.cmd_add(domains)
-        if rejected:
-            reply += "\n\n（忽略了无法识别的内容：" + escape_html(
-                " ".join(rejected[:5])
-            ) + "）"
-        return reply
+        return hint
 
     # ---------------------------------------------------------------- 二次确认
 
@@ -485,13 +491,27 @@ class TelegramBot:
             self._pending.pop(token, None)
 
 
-# 常见的密钥字样；命中任一即视为可疑
+# 分隔符：空白 + 中英文常见标点（中文句号会被 IDNA 当成标签分隔符，必须单列）
+_SEPARATORS = re.compile(r"[\s,;:，、；：。]+")
+
+# 常见的密钥字样。只在「整条消息不是域名清单」时才检查，
+# 所以 token.io / apikey.com 这类合法域名不会走到这里。
 _SECRET_HINTS = (
     "api_key", "apikey", "api key", "secret", "token", "password", "passwd",
     "access_key", "accesskey", "bearer", "私钥", "密钥", "密码", "口令",
 )
 # 长串随机字符：≥24 位、字母数字混合，典型的 API Key 形状
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")
+
+# 裸主机名：不能带协议、路径、查询串、端口或用户名
+_NOT_BARE = ("://", "/", "?", "#", "@", ":")
+
+
+def _is_bare_domain(token: str) -> bool:
+    """是不是一个干净的域名（而不是网址、路径或随口一句话）。"""
+    if any(mark in token for mark in _NOT_BARE):
+        return False
+    return is_valid_domain(normalize_domain(token))
 
 
 def _looks_like_secret(text: str) -> bool:
@@ -500,8 +520,6 @@ def _looks_like_secret(text: str) -> bool:
     if any(hint in lowered for hint in _SECRET_HINTS):
         return True
     for token in _SECRET_TOKEN.findall(text):
-        if normalize_domain(token) and is_valid_domain(normalize_domain(token)):
-            continue  # 长域名不算凭据
         if any(char.isdigit() for char in token) and any(
             char.isalpha() for char in token
         ):

@@ -105,17 +105,24 @@ def normalize_domain(name: str) -> str:
     text = re.sub(r"^[a-z]+://", "", text)
     text = text.split("/", 1)[0]
     text = text.split("?", 1)[0]
-    text = text.rstrip(".")
     if not text:
         return ""
     try:
         text = text.encode("idna").decode("ascii")
     except (UnicodeError, UnicodeDecodeError):
         pass
-    return text
+    # 去尾点必须放在 IDNA 之后：中文句号「。」等都是合法的标签分隔符，
+    # IDNA 会把它们转成 ASCII 的点，先 strip 就会留下 "example.com." 这种残留。
+    return text.rstrip(".")
 
 
-_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+# 后缀既可能是纯字母（com/io），也可能是 punycode 化的国际化后缀
+# （.中国 -> xn--fiqs8s，含数字和连字符），后者不能漏掉。
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$"
+)
 
 
 def is_valid_domain(name: str) -> bool:
