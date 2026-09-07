@@ -186,6 +186,22 @@ class Engine:
             logger.warning("%s 查询失败: %s", watched.domain, status.error)
             return
 
+        if status.state == DomainState.AVAILABLE and not await self._trust_available(
+            watched, previous
+        ):
+            # 复核没通过：当成一次抖动，不改状态、不推送，稍后重查
+            self.storage.update_domain(
+                watched.domain,
+                last_checked_at=now,
+                next_check_at=now + timedelta(
+                    seconds=max(self.config.poll.near_interval, 1.0)
+                ),
+            )
+            # 把返回值也修正成实际采信的状态，免得 CLI / 调用方回显那个被否掉的读数
+            status.state = previous
+            status.error = "疑似误报，已忽略本次读数"
+            return
+
         # pendingDelete / 赎回期的起点：优先用 RDAP 的 last changed，
         # 否则用「我们第一次观测到该状态」的时间兜底
         # 起点取值顺序：RDAP 的 last changed（权威）→ 我们首次观测到该状态的时间 → 现在。
@@ -247,6 +263,51 @@ class Engine:
             await self._on_available(watched.domain, reason="RDAP 查询显示可注册")
         else:
             self._sync_sprint(watched.domain, phase, drop_at)
+
+    async def _trust_available(
+        self, watched: WatchedDomain, previous: DomainState
+    ) -> bool:
+        """判断这次「可注册」是真的，还是一次查询抖动。
+
+        域名走完删除流程掉出来是预期内的，直接信；
+        但一个还在正常注册期的域名突然 404，更像是 RDAP 服务器抽风、
+        或者我们问错了服务器（兜底入口对不认识的后缀也可能回 404）。
+        这种情况复核一次再当真——代价是几秒钟，换掉一次误报和一次白跑的下单。
+        """
+        if not self.config.rdap.reverify_available:
+            return True
+        # UNKNOWN=首次检查（域名本来就可能没被注册过）；其余是删除流程里的正常出口
+        if previous in (
+            DomainState.UNKNOWN,
+            DomainState.AVAILABLE,
+            DomainState.EXPIRED,
+            DomainState.REDEMPTION,
+            DomainState.PENDING_DELETE,
+        ):
+            return True
+
+        delay = max(0.0, self.config.rdap.reverify_delay)
+        logger.warning(
+            "%s 从「%s」直接跳到「可注册」，可疑，%.0fs 后复核一次",
+            watched.domain, previous.label, delay,
+        )
+        if delay:
+            await asyncio.sleep(delay)
+
+        second = await self.rdap.lookup(watched.domain)
+        if second.state == DomainState.AVAILABLE:
+            logger.warning("%s 复核确认可注册", watched.domain)
+            return True
+
+        message = (
+            f"疑似误报：状态从「{previous.label}」跳到「可注册」，"
+            f"复核结果是「{second.state.label}」，已忽略本次"
+        )
+        logger.warning("%s %s", watched.domain, message)
+        self.storage.add_event(
+            "false_positive", domain=watched.domain, message=message, level="warning"
+        )
+        return False
 
     def _transition_detail(self, status: DomainStatus, drop_at: datetime | None) -> str:
         parts: list[str] = []

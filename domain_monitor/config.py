@@ -47,6 +47,10 @@ class RdapConfig:
     rps_per_host: float = 1.0
     burst_per_host: float = 3.0
     max_retries: int = 2
+    # 一个健康的「已注册」域名突然 404，更可能是服务器抽风而不是真被删了。
+    # 这种可疑跳变先复核一次再当真，避免误报和白跑的下单。
+    reverify_available: bool = True
+    reverify_delay: float = 3.0
     user_agent: str = "domain-monitor/1.0 (+https://github.com/doudoudoubao/yuming)"
     overrides: dict[str, str] = field(default_factory=dict)
 

@@ -742,3 +742,142 @@ async def test_parallel_registrars_off_only_hits_cheapest(rdap_server, storage):
     assert storage.get_domain("target.com").state is DomainState.ACQUIRED
     assert cheap.register_calls == 1
     assert pricey.register_calls == 0      # 贵的那家一次都没被打扰
+
+
+# ------------------------------------------------------------------ 误报防护
+
+async def test_suspicious_available_is_reverified(rdap_server, storage):
+    """健康的已注册域名突然 404，多半是抽风：复核不通过就不当真。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 0},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+
+    # 先建立「已注册」的基线
+    rdap_server.set("target.com", rdap_payload())
+    await engine.run_once()
+    assert storage.get_domain("target.com").state is DomainState.REGISTERED
+
+    # 一次 404 抖动，复核时又变回已注册
+    calls = {"n": 0}
+    original = rdap_server.handler
+
+    def flaky(request):
+        if "/domain/target.com" in str(request.url):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(404)
+        return original(request)
+
+    engine.rdap = RdapClient(
+        engine.config.rdap,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(flaky)),
+    )
+    storage.update_domain("target.com", next_check_at=utcnow() - timedelta(seconds=1))
+    await engine.run_once()
+
+    item = storage.get_domain("target.com")
+    assert item.state is DomainState.REGISTERED          # 状态没被误改
+    assert storage.has_successful_purchase("target.com") is False
+    assert "false_positive" in [event.kind for event in storage.recent_events(20)]
+
+
+async def test_false_positive_not_echoed_to_caller(rdap_server, storage):
+    """被否掉的读数不能通过返回值回显出去（否则 CLI 会打印错误的「可注册」）。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 0},
+        purchase={"enabled": False},
+    )
+    storage.upsert_domain("target.com")
+    rdap_server.set("target.com", rdap_payload())
+    await engine.run_once()
+
+    calls = {"n": 0}
+    original = rdap_server.handler
+
+    def flaky(request):
+        if "/domain/target.com" in str(request.url):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(404)
+        return original(request)
+
+    engine.rdap = RdapClient(
+        engine.config.rdap,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(flaky)),
+    )
+    storage.update_domain("target.com", next_check_at=utcnow() - timedelta(seconds=1))
+    statuses = await engine.run_once()
+
+    assert statuses[0].state is DomainState.REGISTERED
+    assert "误报" in (statuses[0].error or "")
+
+
+async def test_confirmed_available_still_goes_through(rdap_server, storage):
+    """复核也说可注册，就正常放行——防误报不能把真信号也挡掉。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 0},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+
+    rdap_server.set("target.com", rdap_payload())
+    await engine.run_once()
+
+    rdap_server.set("target.com", None)      # 真的被释放了
+    storage.update_domain("target.com", next_check_at=utcnow() - timedelta(seconds=1))
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+
+
+async def test_drop_pipeline_available_skips_reverification(rdap_server, storage):
+    """走完删除流程掉出来是预期内的，不该浪费时间复核。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 30},   # 真复核会卡 30 秒
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+    storage.update_domain("target.com", state=DomainState.PENDING_DELETE)
+    rdap_server.set("target.com", None)
+
+    await engine.run_once()      # 不复核，所以不会被 30 秒延迟卡住
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+
+
+async def test_first_ever_check_available_is_trusted(rdap_server, storage):
+    """首次检查就是可注册（域名本来就没人要），直接信。"""
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": True, "reverify_delay": 30},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("brandnew.com")
+    rdap_server.set("brandnew.com", None)
+
+    await engine.run_once()
+
+    assert storage.get_domain("brandnew.com").state is DomainState.ACQUIRED
+
+
+async def test_reverification_can_be_disabled(rdap_server, storage):
+    engine = build_engine(
+        rdap_server, storage,
+        rdap={"reverify_available": False},
+        purchase={"enabled": True, "dry_run": True},
+    )
+    storage.upsert_domain("target.com")
+    rdap_server.set("target.com", rdap_payload())
+    await engine.run_once()
+
+    rdap_server.set("target.com", None)
+    storage.update_domain("target.com", next_check_at=utcnow() - timedelta(seconds=1))
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED

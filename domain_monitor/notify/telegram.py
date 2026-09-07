@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from typing import Any, Protocol
@@ -20,7 +21,7 @@ import httpx
 
 from ..config import TelegramConfig
 from ..models import DomainState
-from ..utils import escape_html, truncate
+from ..utils import escape_html, is_valid_domain, normalize_domain, truncate
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ HELP_TEXT = """<b>域名监控机器人</b>
 /log [数量] — 最近事件
 
 <b>管理</b>
+直接把域名发给我就能加入监控（不用打命令）
 /add &lt;域名&gt; [域名2 ...] — 加入监控
 /del &lt;域名&gt; — 移出监控
 /pause — 暂停自动抢注（仍继续监控）
@@ -313,7 +315,7 @@ class TelegramBot:
         chat_id = (message.get("chat") or {}).get("id")
         user_id = (message.get("from") or {}).get("id")
         text = (message.get("text") or "").strip()
-        if not text.startswith("/"):
+        if not text:
             return
 
         if not self._authorized(chat_id, user_id):
@@ -325,7 +327,10 @@ class TelegramBot:
             )
             return
 
-        reply = await self._handle_command(text)
+        if text.startswith("/"):
+            reply = await self._handle_command(text)
+        else:
+            reply = await self._handle_plain_text(text)
         if reply:
             await self.client.send(reply, chat_id=chat_id)
 
@@ -373,6 +378,44 @@ class TelegramBot:
                     pass
             return await self.controller.cmd_log(limit)
         return f"未知命令 /{escape_html(command)}，发送 /help 查看可用命令"
+
+    async def _handle_plain_text(self, text: str) -> str:
+        """不带 / 的消息：能认出域名就直接加监控，否则给点提示。
+
+        顺带拦一道凭据泄露——用户很容易顺手把 API Key 粘进聊天框，
+        而抢注**从来不需要**通过 Telegram 传任何账号或密钥。
+        """
+        if _looks_like_secret(text):
+            # 注意：绝不把可疑内容写进日志或回显到消息里
+            logger.warning("收到疑似凭据的消息，已拒绝处理（内容未记录）")
+            return (
+                "🔐 <b>这看起来像密钥或密码，我不会处理它。</b>\n\n"
+                "抢注<b>不需要</b>通过 Telegram 发送任何账号、密码或 API Key。\n"
+                "凭据只写在运行本程序那台服务器的环境变量里。\n\n"
+                "⚠️ 如果你刚刚真的发了密钥，请立刻去注册商后台<b>吊销并重新生成</b>，"
+                "并删除这条消息。"
+            )
+
+        tokens = [item for item in re.split(r"[\s,;，、]+", text) if item]
+        domains, rejected = [], []
+        for token in tokens[:20]:
+            name = normalize_domain(token)
+            (domains if is_valid_domain(name) else rejected).append(token)
+
+        if not domains:
+            return (
+                "没认出域名。直接把域名发给我就能加入监控，例如：\n"
+                "<code>example.com</code>\n"
+                "<code>a.com b.net c.io</code>\n\n"
+                "或者发 /help 查看全部命令。"
+            )
+
+        reply = await self.controller.cmd_add(domains)
+        if rejected:
+            reply += "\n\n（忽略了无法识别的内容：" + escape_html(
+                " ".join(rejected[:5])
+            ) + "）"
+        return reply
 
     # ---------------------------------------------------------------- 二次确认
 
@@ -440,6 +483,30 @@ class TelegramBot:
             return False
         finally:
             self._pending.pop(token, None)
+
+
+# 常见的密钥字样；命中任一即视为可疑
+_SECRET_HINTS = (
+    "api_key", "apikey", "api key", "secret", "token", "password", "passwd",
+    "access_key", "accesskey", "bearer", "私钥", "密钥", "密码", "口令",
+)
+# 长串随机字符：≥24 位、字母数字混合，典型的 API Key 形状
+_SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")
+
+
+def _looks_like_secret(text: str) -> bool:
+    """粗略判断一段文本是不是凭据，宁可多拦也不要让密钥进日志。"""
+    lowered = text.lower()
+    if any(hint in lowered for hint in _SECRET_HINTS):
+        return True
+    for token in _SECRET_TOKEN.findall(text):
+        if normalize_domain(token) and is_valid_domain(normalize_domain(token)):
+            continue  # 长域名不算凭据
+        if any(char.isdigit() for char in token) and any(
+            char.isalpha() for char in token
+        ):
+            return True
+    return False
 
 
 def format_duration_row(label: str, value: str) -> str:

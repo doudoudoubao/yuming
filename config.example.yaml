@@ -44,6 +44,10 @@ rdap:
   rps_per_host: 1.0         # 每个 RDAP 服务器每秒最多几次请求 —— 别调高，会被封
   burst_per_host: 3.0
   max_retries: 2
+  # 「已注册」直接跳到「可注册」很可疑（多半是服务器抽风），先复核一次再当真。
+  # 走完删除流程掉出来的属于预期内，不会复核，抢注速度不受影响。
+  reverify_available: true
+  reverify_delay: 3.0
   # 个别后缀的 RDAP 地址可以在这里覆盖
   overrides: {}
   #   cn: "https://rdap.cnnic.cn/"
@@ -64,7 +68,7 @@ telegram:
   bot_token: "${TG_BOT_TOKEN}"        # 找 @BotFather 申请
   chat_id: "${TG_CHAT_ID}"            # 找 @userinfobot 拿你的 id
   allowed_user_ids: []                # 只允许这些 user id 发命令；留空则只认 chat_id
-  commands: true                      # 开启 /add /list /buy 等双向命令
+  commands: true                      # 开启 /add /list /buy 等双向命令（也支持直接发域名）
   poll_timeout: 30
   silent_idle: true         # 非紧急状态变化静音推送（不震手机），可注册/待删除仍会正常提醒
   # 哪些状态变化要推送（其余只记日志）

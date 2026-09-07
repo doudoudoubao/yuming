@@ -222,7 +222,30 @@ async def test_log_limit_is_clamped():
     assert controller.calls == [("log", 50), ("log", 15)]
 
 
-async def test_non_command_text_ignored():
+async def test_plain_domain_is_added():
+    """直接发域名就能加监控，不用打 /add。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("example.com"))
+
+    assert controller.calls == [("add", ("example.com",))]
+
+
+async def test_plain_multiple_domains_various_separators():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("a.com b.net，c.io\nd.org"))
+
+    assert controller.calls == [("add", ("a.com", "b.net", "c.io", "d.org"))]
+
+
+async def test_plain_text_without_domain_gets_hint():
     recorder = Recorder()
     config, client = make_client(recorder)
     controller = StubController()
@@ -231,7 +254,82 @@ async def test_non_command_text_ignored():
     await bot._dispatch(make_message("随便聊两句"))
 
     assert controller.calls == []
-    assert recorder.sent == []
+    assert "没认出域名" in recorder.sent[0]["text"]
+
+
+async def test_plain_text_reports_unrecognized_tokens():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("good.com 不是域名"))
+
+    assert controller.calls == [("add", ("good.com",))]
+    assert "忽略了无法识别的内容" in recorder.sent[0]["text"]
+
+
+async def test_unauthorized_plain_text_still_rejected():
+    recorder = Recorder()
+    config, client = make_client(recorder, allowed_user_ids=[999])
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("example.com", user_id=1))
+
+    assert controller.calls == []
+    assert "未授权" in recorder.sent[0]["text"]
+
+
+# ------------------------------------------------------------- 凭据泄露防护
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "我的 api_key 是 abc123",
+        "NAMESILO_API_KEY=k9x7m2p4q8w1e5r3t6y0",
+        "sk-abc123def456ghi789jkl012mno",
+        "密码 hunter2",
+        "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    ],
+)
+async def test_credential_like_messages_are_refused(text):
+    """用户很容易顺手把密钥粘进聊天框——必须拦住，且不能进日志。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message(text))
+
+    assert controller.calls == []                       # 不当成域名去处理
+    reply = recorder.sent[0]["text"]
+    assert "密钥" in reply or "密码" in reply
+    assert "吊销" in reply                               # 提示用户补救
+    assert text not in reply                            # 绝不回显原文
+
+
+async def test_credential_content_not_logged(caplog):
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    bot = TelegramBot(client, config, StubController())
+
+    secret = "sk-supersecret1234567890abcdef"
+    with caplog.at_level("WARNING"):
+        await bot._dispatch(make_message(secret))
+
+    assert secret not in caplog.text
+
+
+async def test_long_domain_is_not_mistaken_for_a_secret():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("very-long-subdomain-name-here.example.com"))
+
+    assert controller.calls == [("add", ("very-long-subdomain-name-here.example.com",))]
 
 
 # ----------------------------------------------------------------- 二次确认
