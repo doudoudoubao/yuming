@@ -14,7 +14,7 @@ from .app import Application
 from .config import AppConfig, ConfigError, load_config
 from .models import DomainState
 from .registrars import available_providers
-from .utils import human_until, is_valid_domain, normalize_domain, to_utc
+from .utils import human_until, is_valid_domain, normalize_domain, pad, to_utc
 
 logger = logging.getLogger("domain_monitor")
 
@@ -102,21 +102,53 @@ async def cmd_check(config: AppConfig, domains: list[str]) -> int:
 
 
 async def cmd_price(config: AppConfig, domains: list[str]) -> int:
+    """向所有已配置的注册商通道并发查价，按价格排序输出。
+
+    数据来自各注册商自己的 API，是**你账户的真实成交价**
+    （含会员等级折扣、促销、溢价域名加价），比第三方比价站的挂牌价准。
+    """
+    exit_code = 0
     async with Application(config) as app:
-        if not app.registrar.supports_price:
-            print(f"注册商 {app.registrar.name} 不支持查价")
+        if not any(item.supports_price for item in app.pool):
+            print(f"已配置的注册商（{'、'.join(app.pool.labels)}）都不支持查价")
             return 2
+
         for raw in domains:
             name = normalize_domain(raw)
-            result = await app.registrar.check(name)
-            if result.error:
-                print(f"✗ {name}: {result.error}")
+            if not is_valid_domain(name):
+                print(f"✗ {raw}: 不是合法域名")
+                exit_code = 2
                 continue
-            avail = {True: "可注册", False: "不可注册", None: "未知"}[result.available]
-            price = f"{result.price:.2f} {result.currency}" if result.price else "未知"
-            premium = "（溢价域名）" if result.premium else ""
-            print(f"· {name}: {avail}，价格 {price}{premium}")
-    return 0
+
+            quotes = await app.pool.compare(name)
+            print(f"\n{name}")
+            print(f"  {pad('注册商', 14)}{pad('可注册', 8)}{pad('价格', 16)}备注")
+            print("  " + "-" * 52)
+            for registrar, quote in quotes:
+                avail = {True: "是", False: "否", None: "未知"}[quote.available]
+                price = (
+                    f"{quote.price:.2f} {quote.currency}" if quote.price is not None else "-"
+                )
+                notes = []
+                if quote.premium:
+                    notes.append("溢价域名")
+                if quote.error:
+                    notes.append(quote.error[:40])
+                print(
+                    f"  {pad(registrar.label, 14)}{pad(avail, 8)}"
+                    f"{pad(price, 16)}{'; '.join(notes)}"
+                )
+
+            cheapest = await app.pool.cheapest(name, max_price=config.purchase.max_price)
+            if cheapest is not None:
+                registrar, quote = cheapest
+                print(
+                    f"  → 最便宜且在上限({config.purchase.max_price:.2f})内："
+                    f"{registrar.label} {quote.price:.2f} {quote.currency}"
+                )
+            else:
+                print("  → 没有符合价格上限的通道")
+    return exit_code
 
 
 async def cmd_test(config: AppConfig) -> int:
@@ -141,9 +173,10 @@ async def cmd_test(config: AppConfig) -> int:
             probe = await app.probe.probe("example.com")
             print(f"  example.com : {probe.value}")
 
-        registrar_ok, message = await app.registrar.ping()
-        print(f"注册商        : {'✓' if registrar_ok else '✗'} {message}")
-        ok = ok and registrar_ok
+        print(f"注册商通道    : {len(app.pool)} 个（{'、'.join(app.pool.labels)}）")
+        for registrar, healthy, message in await app.pool.ping_all():
+            print(f"  {registrar.label:<12}: {'✓' if healthy else '✗'} {message}")
+            ok = ok and healthy
 
         if config.telegram.enabled:
             me = await app.telegram.get_me()
@@ -191,16 +224,19 @@ async def cmd_list(config: AppConfig) -> int:
         if not items:
             print("监控列表为空")
             return 0
-        width = max(len(item.domain) for item in items)
-        print(f"{'域名'.ljust(width)}  {'状态':<14} {'预计释放':<22} 下次检查")
-        print("-" * (width + 60))
+        width = max(max(len(item.domain) for item in items), 8) + 2
+        print(f"{pad('域名', width)}{pad('状态', 16)}{pad('预计释放', 22)}下次检查")
+        print("-" * (width + 50))
         for item in items:
             drop = (
                 f"{to_utc(item.drop_at):%Y-%m-%d %H:%M}Z" if item.drop_at else "-"
             )
             nxt = human_until(item.next_check_at) if item.next_check_at else "-"
             flag = "" if item.enabled else " (停用)"
-            print(f"{item.domain.ljust(width)}  {item.state.label:<14} {drop:<22} {nxt}{flag}")
+            print(
+                f"{pad(item.domain, width)}{pad(item.state.label, 16)}"
+                f"{pad(drop, 22)}{nxt}{flag}"
+            )
     return 0
 
 

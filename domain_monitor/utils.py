@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -173,6 +174,19 @@ def escape_html(text: Any) -> str:
 
 def truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def display_width(text: str) -> int:
+    """终端里的显示宽度：中日韩字符占两格。"""
+    return sum(
+        2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in str(text)
+    )
+
+
+def pad(text: Any, width: int) -> str:
+    """按显示宽度左对齐补空格，中文表格才不会错位。"""
+    text = str(text)
+    return text + " " * max(0, width - display_width(text))
 
 
 class TokenBucket:

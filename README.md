@@ -16,6 +16,7 @@
 - **释放瞬间抢注** — 并发 + 重试下单，抢到立刻通知
 - **Telegram 双向控制** — 不只是推送，还能用 `/add` `/list` `/buy` `/pause` 直接遥控
 - **7 个注册商适配器** — NameSilo / Dynadot / GoDaddy / Namecheap / 阿里云 / 演练模式 / 任意外部脚本
+- **多通道比价 + 并发抢** — 下单前并发问每家要价挑最便宜的；冲刺时同时向多家下单提高命中率
 - **一堆防误操作的闸门** — 价格上限、每日预算、演练模式、TG 二次确认（详见[安全闸门](#安全闸门)）
 
 ---
@@ -140,6 +141,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 | `exec` | 你自己的脚本 | 接任何没内置的注册商 | 见下 |
 
 具体每家要填哪些字段，`config.example.yaml` 里都有注释好的示例。
+可以只配一家（`registrar:`），也可以配一组做比价和多通道抢注（`registrars:`，见[比价与多通道](#比价与多通道)）。
 
 ### 用 `exec` 接自定义注册商
 
@@ -170,6 +172,75 @@ else
   exit 1
 fi
 ```
+
+---
+
+## 比价与多通道
+
+### 钱花在哪：`price` 命令
+
+```
+$ python -m domain_monitor price mydream.com
+
+mydream.com
+  注册商        可注册  价格            备注
+  ----------------------------------------------------
+  namesilo      是      8.88 USD
+  dynadot       是      10.20 USD
+  aliyun        是      55.00 CNY
+  exec          未知    -               该注册商不支持查价
+  → 最便宜且在上限(12.00)内：namesilo 8.88 USD
+```
+
+价格来自**各注册商自己的 API**，是你账户的真实成交价——含会员等级折扣、
+当期促销、溢价域名加价。这比第三方比价站的挂牌价准，因为挂牌价不知道你是谁。
+
+### 配多个通道
+
+```yaml
+registrars:
+  - provider: namesilo
+    options: {api_key: "${NAMESILO_API_KEY}"}
+  - provider: dynadot
+    options: {api_key: "${DYNADOT_API_KEY}"}
+  - provider: aliyun
+    options: {access_key_id: "${ALIYUN_AK}", access_key_secret: "${ALIYUN_SK}",
+              registrant_profile_id: "123456"}
+```
+
+配了之后：
+
+- **平时下单（`/buy`、RDAP 发现可注册）** → 先并发比价，把最便宜的一家提到队首再下单
+- **冲刺抢注** → **不比价**，直接同时向所有通道开抢
+
+为什么冲刺时不比价：抢注是毫秒级竞争，多几个 HTTP 往返就是把域名让给别人。
+标准 TLD 各家差价通常几美元，抢到的价值远大于价差。
+
+**多通道并发不会重复扣款** —— 同一个域名在注册局只能被注册一次，
+其余通道只会收到「已被注册」的错误。多通道纯粹是多几条赛道，
+这也正是专业抢注商的做法（他们握着几十上百个注册商资质）。
+
+**单通道故障不会拖死整轮**：某家返回「余额不足 / 认证失败」这类硬错误时，
+只把**那一家**摘掉，其余通道继续抢；全部通道都废了才停止并告警。
+
+> 前提是每家都**事先**开好户、充好值、配好 API。抢注时来不及现场注册账号，
+> 所以「哪家最便宜」这个选型决定要提前做 —— 见下面一节。
+
+### 关于比价网站（米情局 / 哪煮米 / TLD-List）
+
+[米情局](https://miqingju.com/)、[哪煮米](https://www.nazhumi.com/)、
+[TLD-List](https://zh-hans.tld-list.com/) 这类站点覆盖几十家注册商的挂牌价，
+适合回答**「我该去哪家开户」**——这是个一次性的人工决策，直接开网页看就行。
+
+本项目**没有**去爬它们，原因是：
+
+1. 它们没有公开 API，靠爬 HTML 页面，改版就断，属于长期维护负担
+2. 挂牌价 ≠ 你的成交价（等级折扣、促销、续费价差异都不体现）
+3. 真正决定买卖的是「你有账号的那几家现在报价多少」，
+   这个问题注册商 API 能权威回答，比价站不能
+
+所以分工是：**用比价站选注册商开户，用本项目的 `price` 命令决定这一单买哪家。**
+如果你确实想把比价站数据接进来做选型辅助，可以用 `exec` 适配器或者提个 issue。
 
 ---
 
@@ -303,7 +374,7 @@ domain_monitor/
 ├── config.py           配置加载与校验
 ├── models.py           数据模型与生命周期推算
 ├── notify/telegram.py  推送 + 命令机器人 + 二次确认
-└── registrars/         注册商适配器（7 个）
+└── registrars/         注册商适配器（7 个）+ pool.py 多通道比价与并发抢
 ```
 
 ---
@@ -312,7 +383,7 @@ domain_monitor/
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio
-python -m pytest              # 188 个测试，全部离线，约 5 秒
+python -m pytest              # 228 个测试，全部离线，约 6 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

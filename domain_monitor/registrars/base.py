@@ -47,6 +47,8 @@ class Registrar:
 
     def __init__(self, config: RegistrarConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
+        # 池子里区分同一家的多个账号，默认与 name 相同
+        self.label = self.name
         self.options: dict[str, Any] = dict(config.options or {})
         self.contact: dict[str, Any] = dict(config.contact or {})
         self._client = client

@@ -13,6 +13,7 @@ from .engine import Engine
 from .notify.telegram import Notifier, NullBot, TelegramBot, TelegramClient
 from .rdap import RdapClient
 from .registrars import build_registrar
+from .registrars.pool import RegistrarPool
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,10 @@ class Application:
         self.config = config
         self.storage = Storage(config.database_path)
         self.rdap = RdapClient(config.rdap, cache_path=config.bootstrap_cache_path)
-        self.registrar = build_registrar(config.registrar)
+        self.pool = RegistrarPool(
+            [build_registrar(item) for item in config.registrar_configs]
+        )
+        self.registrar = self.pool.primary
         self.telegram = TelegramClient(config.telegram)
         self.notifier = Notifier(self.telegram, config.telegram)
         self.probe = DnsProbe(config.dns)
@@ -33,7 +37,7 @@ class Application:
             config,
             self.storage,
             self.rdap,
-            self.registrar,
+            self.pool,
             self.notifier,
             probe=self.probe,
         )
@@ -44,7 +48,7 @@ class Application:
 
     async def start(self) -> None:
         await asyncio.gather(
-            self.rdap.start(), self.registrar.start(), self.telegram.start()
+            self.rdap.start(), self.pool.start(), self.telegram.start()
         )
         added, removed = self.storage.sync_config_domains(self.config.domains)
         if added:
@@ -56,7 +60,7 @@ class Application:
         self.engine.stop()
         self.bot.stop()
         await asyncio.gather(
-            self.rdap.close(), self.registrar.close(), self.telegram.close(),
+            self.rdap.close(), self.pool.close(), self.telegram.close(),
             return_exceptions=True,
         )
         self.storage.prune_events()
@@ -124,7 +128,7 @@ class Application:
         await self.notifier.send(
             "🚀 <b>域名监控已启动</b>\n"
             f"监控域名：{count}\n"
-            f"注册商：<code>{self.registrar.name}</code>\n"
+            f"注册商通道：<code>{'、'.join(self.pool.labels)}</code>\n"
             f"模式：{mode}\n"
             "发送 /help 查看命令",
             quiet=True,

@@ -97,6 +97,8 @@ class PurchaseConfig:
     attempt_concurrency: int = 3      # 并发下单通道数
     attempt_window: float = 900.0     # 冲刺下单最长持续时间
     check_price_first: bool = True    # 下单前先查价（注册商支持时）
+    compare_prices: bool = True       # 配了多个注册商时，比价后挑最便宜的下单
+    parallel_registrars: bool = True  # 冲刺时同时向所有通道下单（先成功者胜）
     skip_rdap_confirm: bool = True    # 冲刺时跳过 RDAP 复核，直接下单抢时间
     confirm_via_telegram: bool = False  # 下单前要 TG 点确认（会慢几秒）
     confirm_timeout: float = 60.0
@@ -143,6 +145,7 @@ class AppConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     purchase: PurchaseConfig = field(default_factory=PurchaseConfig)
     registrar: RegistrarConfig = field(default_factory=RegistrarConfig)
+    registrars: list[RegistrarConfig] = field(default_factory=list)
     lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
     domains: list[DomainEntry] = field(default_factory=list)
     path: str | None = None
@@ -161,6 +164,15 @@ class AppConfig:
     @property
     def bootstrap_cache_path(self) -> str:
         return self.resolve(self.rdap.bootstrap_cache)
+
+    @property
+    def registrar_configs(self) -> list[RegistrarConfig]:
+        """实际使用的注册商列表。
+
+        配了 ``registrars:``（复数）就用它，否则退回单个 ``registrar:``，
+        这样老配置文件不用改也能跑。
+        """
+        return list(self.registrars) if self.registrars else [self.registrar]
 
 
 # 常见 gTLD 的删除周期。数值来自 ICANN 的到期恢复政策（ERRP）：
@@ -246,6 +258,18 @@ def _build_lifecycle(data: Any) -> LifecycleConfig:
     return LifecycleConfig(default=default, tlds=tlds)
 
 
+def _build_registrars(data: Any) -> list[RegistrarConfig]:
+    """解析 ``registrars:`` 列表（多通道比价 / 并发抢注用）。"""
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("registrars 必须是列表(list)")
+    entries: list[RegistrarConfig] = []
+    for index, item in enumerate(data):
+        entries.append(_build(RegistrarConfig, item, f"registrars[{index}]"))
+    return entries
+
+
 def _build_domains(data: Any) -> list[DomainEntry]:
     entries: list[DomainEntry] = []
     seen: set[str] = set()
@@ -308,6 +332,7 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
         telegram=_build(TelegramConfig, data.get("telegram"), "telegram"),
         purchase=_build(PurchaseConfig, data.get("purchase"), "purchase"),
         registrar=_build(RegistrarConfig, data.get("registrar"), "registrar"),
+        registrars=_build_registrars(data.get("registrars")),
         lifecycle=_build_lifecycle(data.get("lifecycle")),
         domains=_build_domains(data.get("domains")),
         path=str(path) if path else None,
@@ -348,9 +373,15 @@ def _validate(config: AppConfig) -> None:
 
     # 真金白银的开关：非 dry_run 时把该拦的都拦住
     if config.purchase.enabled and not config.purchase.dry_run:
-        if config.registrar.provider in ("", "dryrun"):
+        fake = [
+            item.provider or "dryrun"
+            for item in config.registrar_configs
+            if (item.provider or "dryrun") in ("", "dryrun")
+        ]
+        if fake:
+            where = "registrars 列表里" if config.registrars else "registrar.provider"
             raise ConfigError(
-                "purchase.dry_run=false 时必须配置真实的 registrar.provider"
+                f"purchase.dry_run=false 时必须配置真实的注册商，但 {where} 仍是 dryrun 假适配器"
             )
         if config.purchase.max_price <= 0:
             raise ConfigError("purchase.max_price 必须大于 0，避免无上限下单")

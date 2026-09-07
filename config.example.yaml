@@ -83,6 +83,8 @@ purchase:
   attempt_concurrency: 3    # 并发下单通道数
   attempt_window: 900       # 冲刺下单最长持续时间
   check_price_first: true   # 下单前先查价（注册商支持时）
+  compare_prices: true      # 配了多个注册商时并发比价，挑最便宜的一家下单
+  parallel_registrars: true # 冲刺时同时向所有通道下单，先成功者胜（不会重复扣款，见 README）
   skip_rdap_confirm: true   # 冲刺时 DNS 命中即下单；改 false 会先用 RDAP 复核（更稳但慢一个往返）
   confirm_via_telegram: false  # 下单前要在 TG 点确认 —— 会慢几秒，抢热门域名别开
   confirm_timeout: 60
@@ -151,6 +153,25 @@ registrar:
   #   postal_code: "200000"
   #   country: "CN"
   #   organization: ""
+
+# ------------------------------------------------------- 多注册商（比价 / 多通道）
+# 配了这个列表就会**覆盖**上面单数的 registrar，好处有两个：
+#   1. 比价：下单前并发问每家要价，挑最便宜的一家买（用的是你账户的真实成交价）
+#   2. 多通道抢注：冲刺时同时向所有通道下单，先成功者胜。
+#      同一域名在注册局只能注册一次，所以并发不会重复扣款，但成功率明显更高。
+# 每家都要事先开户、充值、配好 API —— 抢注时来不及现场注册账号。
+# registrars:
+#   - provider: namesilo
+#     options:
+#       api_key: "${NAMESILO_API_KEY}"
+#   - provider: dynadot
+#     options:
+#       api_key: "${DYNADOT_API_KEY}"
+#   - provider: aliyun
+#     options:
+#       access_key_id: "${ALIYUN_AK}"
+#       access_key_secret: "${ALIYUN_SK}"
+#       registrant_profile_id: "123456"
 
 # ---------------------------------------------------------------- 删除周期
 # 用来预测「什么时候会被释放」，进而决定何时提速。

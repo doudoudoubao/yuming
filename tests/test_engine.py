@@ -581,3 +581,164 @@ async def test_sprint_rdap_confirm_rejects_false_positive(rdap_server, storage):
 
     assert storage.has_successful_purchase("target.com") is False
     assert rdap_server.calls                          # 确实做了复核
+
+
+# --------------------------------------------------------------- 多注册商通道
+
+def attach_pool(engine, *registrars):
+    """给引擎换上一个多通道池（setter 会重建 pool）。"""
+    from domain_monitor.registrars.pool import RegistrarPool
+
+    engine.registrar = RegistrarPool(list(registrars))
+    return engine.pool
+
+
+async def test_multi_registrar_buys_from_cheapest(rdap_server, storage):
+    from tests.test_pool import FakeRegistrar
+
+    rdap_server.set("target.com", None)
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "compare_prices": True, "attempt_interval": 0,
+                  "attempt_concurrency": 1, "max_attempts": 4},
+    )
+    storage.upsert_domain("target.com")
+    pricey = FakeRegistrar("pricey", price=30.0, results=[("ok", "")])
+    cheap = FakeRegistrar("cheap", price=9.0, results=[("ok", "")])
+    attach_pool(engine, pricey, cheap)
+
+    await engine.run_once()
+
+    item = storage.get_domain("target.com")
+    assert item.state is DomainState.ACQUIRED
+    # 便宜的那家被提到队首，所以它先出手
+    assert cheap.register_calls >= 1
+    assert storage.spend_today() == 9.0
+    assert "price_compare" in [event.kind for event in storage.recent_events(20)]
+
+
+async def test_multi_registrar_rejects_when_all_over_limit(rdap_server, storage):
+    from tests.test_pool import FakeRegistrar
+
+    rdap_server.set("target.com", None)
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 10,
+                  "compare_prices": True},
+    )
+    storage.upsert_domain("target.com")
+    attach_pool(engine, FakeRegistrar("a", price=30.0), FakeRegistrar("b", price=45.0))
+
+    await engine.run_once()
+
+    assert storage.has_successful_purchase("target.com") is False
+    assert "price_reject" in [event.kind for event in storage.recent_events(20)]
+
+
+async def test_one_dead_channel_does_not_stop_the_others(rdap_server, storage):
+    """一家余额不足时，抢注要继续用其他通道，而不是整轮放弃。"""
+    from tests.test_pool import FakeRegistrar
+
+    rdap_server.set("target.com", None)
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "compare_prices": False, "check_price_first": False,
+                  "attempt_interval": 0, "attempt_concurrency": 1, "max_attempts": 6},
+    )
+    storage.upsert_domain("target.com")
+    broke = FakeRegistrar("broke", results=[("fatal", "insufficient funds")])
+    good = FakeRegistrar("good", price=9.0,
+                         results=[("retry", "not available"), ("ok", "")])
+    pool = attach_pool(engine, broke, good)
+
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+    assert broke.register_calls == 1              # 只试了一次就被摘掉
+    assert "broke" in pool.disabled_reasons
+
+
+async def test_all_channels_down_aborts(rdap_server, storage):
+    from tests.test_pool import FakeRegistrar
+
+    rdap_server.set("target.com", None)
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "compare_prices": False, "check_price_first": False,
+                  "attempt_interval": 0, "attempt_concurrency": 1, "max_attempts": 20},
+    )
+    storage.upsert_domain("target.com")
+    attach_pool(
+        engine,
+        FakeRegistrar("a", results=[("fatal", "unauthorized")]),
+        FakeRegistrar("b", results=[("fatal", "insufficient funds")]),
+    )
+
+    await engine.run_once()
+
+    assert storage.has_successful_purchase("target.com") is False
+    events = storage.recent_events(20)
+    assert "acquire_abort" in [event.kind for event in events]
+    assert any("均已停用" in event.message for event in events)
+
+
+async def test_sprint_skips_price_comparison(rdap_server, storage):
+    """冲刺是毫秒级竞争：不比价，直接开抢。"""
+    from tests.test_pool import FakeRegistrar
+
+    engine = build_engine(
+        rdap_server, storage,
+        dns={"enabled": True, "interval": 0.01},
+        poll={"jitter": 0.0, "sprint_tail": 1.0},
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "compare_prices": True, "check_price_first": True,
+                  "skip_rdap_confirm": True, "attempt_interval": 0,
+                  "attempt_concurrency": 1, "max_attempts": 3},
+    )
+    winner = FakeRegistrar("chan", price=9.0, results=[("ok", "")])
+    attach_pool(engine, winner, FakeRegistrar("other", price=8.0))
+    engine.probe = StubProbe([ProbeResult.NXDOMAIN])
+    storage.upsert_domain("target.com")
+
+    await engine._sprint("target.com", utcnow())
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+    assert winner.check_calls == 0      # 一次查价都没做，省下的都是时间
+
+
+async def test_registrar_setter_rebuilds_pool(rdap_server, storage):
+    """engine.registrar = X 必须真的生效，不能是静默无效赋值。"""
+    from tests.test_pool import FakeRegistrar
+
+    engine = build_engine(rdap_server, storage)
+    replacement = FakeRegistrar("replacement")
+    engine.registrar = replacement
+
+    assert engine.pool.primary is replacement
+    assert engine.registrar is replacement
+
+
+async def test_parallel_registrars_off_only_hits_cheapest(rdap_server, storage):
+    """parallel_registrars=false 时不并发骚扰所有注册商，只打最便宜那家。"""
+    from tests.test_pool import FakeRegistrar
+
+    rdap_server.set("target.com", None)
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "compare_prices": True, "parallel_registrars": False,
+                  "attempt_interval": 0, "attempt_concurrency": 1, "max_attempts": 3},
+    )
+    storage.upsert_domain("target.com")
+    pricey = FakeRegistrar("pricey", price=30.0, results=[("ok", "")])
+    cheap = FakeRegistrar("cheap", price=9.0, results=[("ok", "")])
+    attach_pool(engine, pricey, cheap)
+
+    await engine.run_once()
+
+    assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+    assert cheap.register_calls == 1
+    assert pricey.register_calls == 0      # 贵的那家一次都没被打扰

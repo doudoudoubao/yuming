@@ -146,3 +146,15 @@ def test_backoff_honours_zero_retry_after():
     backoff = Backoff(base=60.0)
     assert backoff.penalize(retry_after=0) == 0
     assert backoff.remaining == 0
+
+
+def test_display_width_counts_cjk_as_two():
+    from domain_monitor.utils import display_width, pad
+
+    assert display_width("abc") == 3
+    assert display_width("待删除") == 6
+    assert display_width("已过期(宽限期)") == 14  # 6 个中文(各占 2) + 2 个半角括号
+    # 中英混排的表格列必须对齐到同一显示宽度
+    assert display_width(pad("待删除", 12)) == 12
+    assert display_width(pad("expired", 12)) == 12
+    assert pad("toolongvalue", 4) == "toolongvalue"   # 超宽不截断

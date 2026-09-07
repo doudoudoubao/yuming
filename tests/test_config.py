@@ -77,7 +77,7 @@ def test_telegram_requires_a_recipient():
 
 
 def test_real_purchase_requires_real_registrar():
-    with pytest.raises(ConfigError, match="真实的 registrar.provider"):
+    with pytest.raises(ConfigError, match="必须配置真实的注册商"):
         load_config(data={"purchase": {"enabled": True, "dry_run": False}})
 
 
@@ -133,3 +133,60 @@ def test_state_dir_resolution():
     assert config.database_path == "/tmp/dm/x.db"
     config2 = load_config(data={"state_dir": "/tmp/dm", "database": "/abs/y.db"})
     assert config2.database_path == "/abs/y.db"
+
+
+# --------------------------------------------------------------- 多注册商通道
+
+def test_registrars_list_parsed():
+    config = load_config(
+        data={
+            "registrars": [
+                {"provider": "namesilo", "options": {"api_key": "k"}},
+                {"provider": "dynadot", "options": {"api_key": "d"}},
+            ]
+        }
+    )
+    assert [item.provider for item in config.registrar_configs] == ["namesilo", "dynadot"]
+
+
+def test_single_registrar_still_works():
+    """老配置文件（只有单数 registrar:）不用改也能跑。"""
+    config = load_config(data={"registrar": {"provider": "aliyun"}})
+    assert [item.provider for item in config.registrar_configs] == ["aliyun"]
+
+
+def test_registrars_must_be_a_list():
+    with pytest.raises(ConfigError, match="registrars 必须是列表"):
+        load_config(data={"registrars": {"provider": "namesilo"}})
+
+
+def test_registrars_unknown_key_rejected():
+    with pytest.raises(ConfigError, match=r"registrars\[0\] 存在未知配置项"):
+        load_config(data={"registrars": [{"provider": "namesilo", "typo": 1}]})
+
+
+def test_dryrun_mixed_into_real_purchase_rejected():
+    """真实下单时列表里混进假适配器要被拦住。"""
+    with pytest.raises(ConfigError, match="dryrun 假适配器"):
+        load_config(
+            data={
+                "purchase": {"enabled": True, "dry_run": False},
+                "registrars": [
+                    {"provider": "namesilo", "options": {"api_key": "k"}},
+                    {"provider": "dryrun"},
+                ],
+            }
+        )
+
+
+def test_multi_real_registrars_accepted():
+    config = load_config(
+        data={
+            "purchase": {"enabled": True, "dry_run": False},
+            "registrars": [
+                {"provider": "namesilo", "options": {"api_key": "k"}},
+                {"provider": "dynadot", "options": {"api_key": "d"}},
+            ],
+        }
+    )
+    assert len(config.registrar_configs) == 2

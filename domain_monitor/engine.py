@@ -31,6 +31,7 @@ from .models import (
 from .notify.telegram import Notifier, NullBot
 from .rdap import RdapClient
 from .registrars.base import Registrar
+from .registrars.pool import RegistrarPool
 from .storage import Storage
 from .utils import (
     apply_jitter,
@@ -58,7 +59,7 @@ class Engine:
         config: AppConfig,
         storage: Storage,
         rdap: RdapClient,
-        registrar: Registrar,
+        registrar: Registrar | RegistrarPool,
         notifier: Notifier,
         *,
         probe: DnsProbe | None = None,
@@ -67,7 +68,8 @@ class Engine:
         self.config = config
         self.storage = storage
         self.rdap = rdap
-        self.registrar = registrar
+        # 统一走通道池：单个注册商就是只有一个成员的池子
+        self.pool = registrar if isinstance(registrar, RegistrarPool) else RegistrarPool([registrar])
         self.notifier = notifier
         self.probe = probe or DnsProbe(config.dns)
         self.bot = bot or NullBot()
@@ -76,6 +78,19 @@ class Engine:
         self._acquiring: set[str] = set()
         self._semaphore = asyncio.Semaphore(config.poll.concurrency)
         self.started_at = utcnow()
+
+    @property
+    def registrar(self) -> Registrar:
+        """主注册商通道。
+
+        赋值会**重建整个通道池**——否则改了 registrar 却仍走旧池子，
+        是个很难发现的静默失效。
+        """
+        return self.pool.primary
+
+    @registrar.setter
+    def registrar(self, value: Registrar | RegistrarPool) -> None:
+        self.pool = value if isinstance(value, RegistrarPool) else RegistrarPool([value])
 
     # ------------------------------------------------------------------ 暂停开关
 
@@ -321,7 +336,7 @@ class Engine:
                 if not self.probe.usable:
                     # 没有 dnspython 就退化成按 sprint_interval 直接问注册商
                     await self._on_available(domain, reason="冲刺阶段直接尝试下单",
-                                             confirmed=False)
+                                             confirmed=False, fast=True)
                     await asyncio.sleep(max(poll.sprint_interval, 1.0))
                     continue
 
@@ -350,7 +365,8 @@ class Engine:
                             continue
 
                     acquired = await self._on_available(
-                        domain, reason="DNS 探测到域名已从注册局消失", confirmed=False
+                        domain, reason="DNS 探测到域名已从注册局消失",
+                        confirmed=False, fast=True,
                     )
                     if acquired:
                         return
@@ -374,7 +390,7 @@ class Engine:
     # -------------------------------------------------------------------- 抢注
 
     async def _on_available(
-        self, domain: str, *, reason: str, confirmed: bool = True
+        self, domain: str, *, reason: str, confirmed: bool = True, fast: bool = False
     ) -> bool:
         """域名看起来可注册了，走一遍闸门再下单。返回是否抢到。"""
         if domain in self._acquiring:
@@ -402,15 +418,19 @@ class Engine:
 
         self._acquiring.add(domain)
         try:
-            result = await self._acquire(watched, reason=reason)
+            result = await self._acquire(watched, reason=reason, fast=fast)
         finally:
             self._acquiring.discard(domain)
         return bool(result and result.success)
 
     async def _acquire(
-        self, watched: WatchedDomain, *, reason: str
+        self, watched: WatchedDomain, *, reason: str, fast: bool = False
     ) -> RegistrationResult | None:
-        """执行下单：查价 → 校验预算 → （可选）TG 确认 → 并发重试下单。"""
+        """执行下单：查价 → 校验预算 → （可选）TG 确认 → 并发重试下单。
+
+        ``fast=True`` 用于冲刺：跳过比价，省下几百毫秒直接开抢。
+        抢注是毫秒级竞争，几美元的价差远不如抢到本身值钱。
+        """
         domain = watched.domain
         purchase = self.config.purchase
         price_limit = watched.max_price if watched.max_price is not None else purchase.max_price
@@ -418,24 +438,14 @@ class Engine:
         price: float | None = None
         currency = purchase.currency
 
-        if purchase.check_price_first and self.registrar.supports_price:
-            availability = await self.registrar.check(domain)
-            if availability.error:
-                logger.warning("%s 查价失败: %s（继续尝试下单）", domain, availability.error)
-            if availability.price is not None:
-                price, currency = availability.price, availability.currency
-                if price > price_limit:
-                    message = (
-                        f"价格 {price:.2f} {currency} 超过上限 {price_limit:.2f}，放弃下单"
-                    )
-                    logger.warning("%s %s", domain, message)
-                    self.storage.add_event(
-                        "price_reject", domain=domain, message=message, level="warning"
-                    )
-                    await self.notifier.failed(domain, message)
-                    return None
-            if availability.premium:
-                logger.warning("%s 是溢价域名（premium），价格可能远高于常规", domain)
+        self.pool.reset()
+        if fast:
+            logger.info("%s 冲刺下单，跳过比价直接开抢", domain)
+        elif purchase.check_price_first:
+            resolved = await self._resolve_price(domain, price_limit)
+            if resolved is None:      # 报价超上限，放弃
+                return None
+            price, currency = resolved
 
         # 预算闸门：价格未知时按上限保守估算
         estimated = price if price is not None else price_limit
@@ -462,6 +472,77 @@ class Engine:
 
         return await self._attempt_loop(domain, years, price_limit, reason)
 
+    async def _resolve_price(
+        self, domain: str, price_limit: float
+    ) -> tuple[float | None, str] | None:
+        """查价。配了多个通道就比价并把最便宜的一家提到前面。
+
+        返回 ``(价格, 币种)``；返回 ``None`` 表示报价超过上限、应当放弃下单。
+        元组里价格为 ``None`` 表示查不到价——查不到不等于买不了，继续下单。
+        """
+        purchase = self.config.purchase
+        multi = len(self.pool.active) > 1 and purchase.compare_prices
+
+        if not multi:
+            registrar = self.pool.primary
+            if not registrar.supports_price:
+                return None, purchase.currency
+            availability = await registrar.check(domain)
+            if availability.error:
+                logger.warning("%s 查价失败: %s（继续尝试下单）", domain, availability.error)
+            if availability.premium:
+                logger.warning("%s 是溢价域名（premium），价格可能远高于常规", domain)
+            if availability.price is None:
+                return None, availability.currency or purchase.currency
+            if availability.price > price_limit:
+                await self._reject_price(domain, availability.price, availability.currency,
+                                         price_limit)
+                return None
+            return availability.price, availability.currency
+
+        quotes = await self.pool.compare(domain)
+        priced = [(item, quote) for item, quote in quotes if quote.price is not None]
+        summary = "、".join(
+            f"{item.label} {quote.price:.2f} {quote.currency}"
+            if quote.price is not None else f"{item.label} 未知"
+            for item, quote in quotes
+        )
+        logger.info("%s 多通道比价：%s", domain, summary)
+        self.storage.add_event(
+            "price_compare", domain=domain, message=summary,
+            data={item.label: quote.price for item, quote in quotes},
+        )
+
+        if not priced:
+            logger.warning("%s 所有通道都查不到价，直接按原顺序下单", domain)
+            return None, purchase.currency
+
+        affordable = [
+            (item, quote) for item, quote in priced
+            if quote.price <= price_limit and quote.available is not False
+        ]
+        if not affordable:
+            best = priced[0][1]
+            await self._reject_price(domain, best.price, best.currency, price_limit)
+            return None
+
+        winner, quote = affordable[0]
+        # 把最便宜的一家排到最前，让 plan_shots 优先打它
+        self.pool.prioritize(winner.label)
+        logger.warning(
+            "%s 选定最便宜通道 %s（%.2f %s），共比较 %d 家",
+            domain, winner.label, quote.price, quote.currency, len(quotes),
+        )
+        return quote.price, quote.currency
+
+    async def _reject_price(
+        self, domain: str, price: float, currency: str, limit: float
+    ) -> None:
+        message = f"最低报价 {price:.2f} {currency} 超过上限 {limit:.2f}，放弃下单"
+        logger.warning("%s %s", domain, message)
+        self.storage.add_event("price_reject", domain=domain, message=message, level="warning")
+        await self.notifier.failed(domain, message)
+
     async def _attempt_loop(
         self, domain: str, years: int, price_limit: float, reason: str
     ) -> RegistrationResult | None:
@@ -473,44 +554,34 @@ class Engine:
         saw_timeout = False
 
         logger.warning(
-            "开始抢注 %s（%s）：最多 %d 次，%d 路并发，窗口 %s",
+            "开始抢注 %s（%s）：最多 %d 次，%d 路并发，通道 %s，窗口 %s",
             domain, reason, purchase.max_attempts, purchase.attempt_concurrency,
+            "/".join(item.label for item in self.pool.active),
             human_delta(purchase.attempt_window),
         )
 
         while attempts < purchase.max_attempts and utcnow() < deadline:
             if self._stop.is_set():
                 break
-            batch = min(purchase.attempt_concurrency, purchase.max_attempts - attempts)
-            attempts += batch
-            self.storage.bump_attempts(domain, batch)
+            if not self.pool.active:
+                return await self._abort_all_channels_down(domain, attempts)
 
-            results = await asyncio.gather(
-                *(self._register_once(domain, years) for _ in range(batch)),
-                return_exceptions=True,
-            )
+            remaining = purchase.max_attempts - attempts
+            winner, results = await self._register_round(domain, years, remaining)
+            attempts += max(1, len(results))
+            self.storage.bump_attempts(domain, max(1, len(results)))
 
-            fatal: RegistrationResult | None = None
+            if winner is not None:
+                return await self._on_acquired(winner, attempts)
+
             for item in results:
-                if isinstance(item, BaseException):
-                    logger.error("%s 下单调用异常: %s", domain, item)
-                    continue
                 last = item
-                if item.success:
-                    return await self._on_acquired(item, attempts)
                 if "超时" in item.message or "timeout" in item.message.lower():
                     saw_timeout = True
-                if not item.retryable:
-                    fatal = item
 
-            if fatal is not None:
-                message = f"遇到不可重试的错误，停止抢注：{fatal.message}"
-                logger.error("%s %s", domain, message)
-                self.storage.add_event(
-                    "acquire_abort", domain=domain, message=message, level="error"
-                )
-                await self.notifier.failed(domain, message)
-                return fatal
+            # 单通道时一次硬错误就该停；多通道时只停用出错那家，其余继续
+            if not self.pool.active:
+                return await self._abort_all_channels_down(domain, attempts)
 
             await asyncio.sleep(purchase.attempt_interval)
 
@@ -524,19 +595,44 @@ class Engine:
         await self.notifier.failed(domain, message)
         return last
 
-    async def _register_once(self, domain: str, years: int) -> RegistrationResult:
+    async def _register_round(
+        self, domain: str, years: int, remaining: int
+    ) -> tuple[RegistrationResult | None, list[RegistrationResult]]:
+        """打一轮下单。演练模式直接返回假成功，不碰任何注册商。"""
         purchase = self.config.purchase
         if purchase.dry_run:
             logger.info("[dry-run] 假装为 %s 下单 %d 年", domain, years)
-            return RegistrationResult(
+            fake = RegistrationResult(
                 domain=domain,
                 success=True,
-                provider=f"{self.registrar.name}(dry-run)",
+                provider=f"{self.pool.primary.label}(dry-run)",
                 order_id="dry-run",
                 price=0.0,
                 message="dry_run=true，未产生真实订单",
             )
-        return await self.registrar.register(domain, purchase, years=years)
+            return fake, [fake]
+
+        return await self.pool.race_register(
+            domain,
+            purchase,
+            years=years,
+            concurrency=purchase.attempt_concurrency,
+            limit=remaining,
+            parallel=purchase.parallel_registrars,
+        )
+
+    async def _abort_all_channels_down(
+        self, domain: str, attempts: int
+    ) -> RegistrationResult | None:
+        """所有注册商通道都因硬错误停用，没法再抢了。"""
+        reasons = "；".join(
+            f"{label}: {reason}" for label, reason in self.pool.disabled_reasons.items()
+        )
+        message = f"全部 {len(self.pool)} 个注册商通道均已停用，停止抢注（尝试 {attempts} 次）\n{reasons}"
+        logger.error("%s %s", domain, message)
+        self.storage.add_event("acquire_abort", domain=domain, message=message, level="error")
+        await self.notifier.failed(domain, message)
+        return None
 
     async def _on_acquired(self, result: RegistrationResult, attempts: int) -> RegistrationResult:
         """抢到了：落库、通知、按需摘除监控。"""
@@ -612,7 +708,7 @@ class Engine:
             f"运行时长：{uptime}",
             f"监控域名：{stats['total']}（启用 {stats['enabled']}）",
             f"状态分布：{by_state}",
-            f"注册商：<code>{escape_html(self.registrar.name)}</code>",
+            f"注册商通道：<code>{escape_html('、'.join(self.pool.labels))}</code>",
             f"抢注模式：{mode}",
             f"下单尝试：{stats['purchase_attempts']} 次，成功 {stats['purchase_wins']} 次",
             f"今日花费：{stats['spend_today']:.2f} / {purchase.daily_budget:.2f}",
