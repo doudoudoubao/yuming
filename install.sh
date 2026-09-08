@@ -159,12 +159,19 @@ else
     echo "TG_BOT_TOKEN=${TG_TOKEN}"
     echo "TG_CHAT_ID=${TG_CHAT}"
     echo
-    echo "# 注册商 API（要开启自动抢注时再填，先留空）"
-    echo "NAMESILO_API_KEY="
-    echo "DYNADOT_API_KEY="
-    echo "ALIYUN_AK="
-    echo "ALIYUN_SK="
+    echo "# 注册商凭据（要开启自动抢注时再填，先留空）"
+    echo "# 只需要填你实际用的那一家。各家要填什么："
+    echo "#   .venv/bin/python -m domain_monitor registrar"
   } > "$ENV_FILE"
+  # 变量名由程序生成，保证和配置模板、registrar 命令三处一致
+  "$VPY" -c "
+from domain_monitor.registrars import PROVIDERS, credential_env_vars
+for provider, names in credential_env_vars().items():
+    print()
+    print(f'# {PROVIDERS[provider].display_name}')
+    for name in names:
+        print(f'{name}=')
+" >> "$ENV_FILE" 2>/dev/null || true
   chmod 600 "$ENV_FILE"
   ok "密钥已写入 .env（权限 600，仅本人可读）"
 

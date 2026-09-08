@@ -312,7 +312,7 @@ def cmd_registrar(config: AppConfig, name: str | None) -> int:
     本程序自己不卖域名——下单一律通过注册商的 API 完成，
     所以必须先去某一家开户、充值、开 API，再把凭据填进配置。
     """
-    from .registrars import PROVIDERS
+    from .registrars import PROVIDERS, env_var_name
 
     if name:
         key = name.strip().lower()
@@ -337,7 +337,7 @@ def cmd_registrar(config: AppConfig, name: str | None) -> int:
         if provider.required_options:
             print("      options:")
             for option in provider.required_options:
-                placeholder = "${" + f"{key.upper()}_{option.upper()}" + "}"
+                placeholder = "${" + env_var_name(key, option) + "}"
                 print(f"        {option}: \"{placeholder}\"")
         if provider.needs_contact:
             print("      contact:            # 注册域名要提交的注册人资料")
@@ -351,7 +351,7 @@ def cmd_registrar(config: AppConfig, name: str | None) -> int:
         if provider.required_options:
             print("\n  密钥写进项目根目录的 .env（权限 600），不要写进 config.yaml：")
             for option in provider.required_options:
-                print(f"    {key.upper()}_{option.upper()}=你的值")
+                print(f"    {env_var_name(key, option)}=你的值")
         print()
         return 0
 

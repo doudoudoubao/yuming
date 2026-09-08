@@ -8,7 +8,7 @@ import httpx
 
 from ..config import RegistrarConfig
 from .aliyun import AliyunRegistrar
-from .base import Registrar, RegistrarError
+from .base import Registrar, RegistrarError, env_var_name
 from .dryrun import DryRunRegistrar
 from .dynadot import DynadotRegistrar
 from .exec_provider import ExecRegistrar
@@ -44,8 +44,19 @@ def build_registrar(
     return cls(config, client=client)
 
 
+def credential_env_vars() -> dict[str, list[str]]:
+    """每个注册商需要哪些环境变量。供配置模板和安装脚本使用。"""
+    return {
+        name: [env_var_name(name, option) for option in cls.required_options]
+        for name, cls in sorted(PROVIDERS.items())
+        if cls.required_options and name not in ("exec", "dryrun")
+    }
+
+
 __all__ = [
     "Registrar",
+    "env_var_name",
+    "credential_env_vars",
     "RegistrarError",
     "PROVIDERS",
     "available_providers",

@@ -13,7 +13,16 @@ services:
       # 密钥统一从宿主机环境或 .env 文件注入，不要写进 config.yaml
       TG_BOT_TOKEN: "${TG_BOT_TOKEN}"
       TG_CHAT_ID: "${TG_CHAT_ID}"
+      # 注册商凭据：只需要填你实际用的那一家
+      # 各家要填什么：docker compose exec domain-monitor \
+      #   python -m domain_monitor registrar
       NAMESILO_API_KEY: "${NAMESILO_API_KEY:-}"
       DYNADOT_API_KEY: "${DYNADOT_API_KEY:-}"
-      ALIYUN_AK: "${ALIYUN_AK:-}"
-      ALIYUN_SK: "${ALIYUN_SK:-}"
+      ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
+      ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
+      ALIYUN_REGISTRANT_PROFILE_ID: "${ALIYUN_REGISTRANT_PROFILE_ID:-}"
+      GODADDY_API_KEY: "${GODADDY_API_KEY:-}"
+      GODADDY_API_SECRET: "${GODADDY_API_SECRET:-}"
+      NAMECHEAP_API_USER: "${NAMECHEAP_API_USER:-}"
+      NAMECHEAP_API_KEY: "${NAMECHEAP_API_KEY:-}"
+      NAMECHEAP_CLIENT_IP: "${NAMECHEAP_CLIENT_IP:-}"

@@ -35,6 +35,15 @@ FATAL_HINTS = (
 )
 
 
+def env_var_name(provider: str, option: str) -> str:
+    """凭据对应的环境变量名。
+
+    命令行提示、配置模板、安装脚本三处都从这里取，
+    否则很容易出现「照着提示填了，配置文件却读的是另一个名字」。
+    """
+    return f"{provider}_{option}".upper()
+
+
 class RegistrarError(Exception):
     """注册商调用异常。"""
 

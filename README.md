@@ -297,6 +297,10 @@ domain-monitor registrar namesilo     # 看某一家的完整开通说明和配�
 `domain-monitor registrar <名字>` 会直接给出可以照抄的配置片段、
 密钥该写进哪个文件，以及那家特有的坑（比如 Namecheap 必须把出口 IP 加白名单）。
 
+**密钥填在哪：** 项目根目录的 `.env`（安装时自动生成，权限 600），
+`config.yaml` 里只写 `${NAMESILO_API_KEY}` 这样的占位符。
+改完 `.env` 重启服务生效，不用手动 `source`。
+
 没内置的注册商用 `exec` 适配器接你自己的脚本。
 
 ## 注册商配置
@@ -492,8 +496,9 @@ registrars:
   - provider: dynadot
     options: {api_key: "${DYNADOT_API_KEY}"}
   - provider: aliyun
-    options: {access_key_id: "${ALIYUN_AK}", access_key_secret: "${ALIYUN_SK}",
-              registrant_profile_id: "123456"}
+    options: {access_key_id: "${ALIYUN_ACCESS_KEY_ID}",
+              access_key_secret: "${ALIYUN_ACCESS_KEY_SECRET}",
+              registrant_profile_id: "${ALIYUN_REGISTRANT_PROFILE_ID}"}
 ```
 
 配了之后：

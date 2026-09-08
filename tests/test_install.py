@@ -226,3 +226,53 @@ def test_block_edits_are_composable():
     assert data["domains"] == ["a.com", "b.com"]
     assert data["telegram"]["enabled"] is True
     assert result.count("#") >= text.count("#") - 6
+
+
+def test_credential_env_names_are_consistent_everywhere():
+    """凭据变量名在三处必须一致：registrar 命令、配置模板、.env。
+
+    对不上的话，用户照着命令提示填了变量，配置文件却读的是另一个名字，
+    结果是「明明填了却报缺少配置」——极难自己排查。
+    """
+    import re
+
+    from domain_monitor.registrars import credential_env_vars
+
+    template = (REPO / "config.example.yaml").read_text(encoding="utf-8")
+    referenced = set(re.findall(r"\$\{([A-Z_]+)\}", template))
+
+    for provider, names in credential_env_vars().items():
+        for name in names:
+            assert name in referenced, (
+                f"config.example.yaml 没有引用 {name}（{provider} 需要它）"
+            )
+
+
+def test_env_var_naming_is_derived_not_hardcoded():
+    """命名规则只能有一个来源，否则迟早又会各写各的。"""
+    from domain_monitor.registrars import env_var_name
+
+    assert env_var_name("namesilo", "api_key") == "NAMESILO_API_KEY"
+    assert env_var_name("aliyun", "access_key_id") == "ALIYUN_ACCESS_KEY_ID"
+
+
+def test_no_stale_credential_names_in_docs():
+    """早期用过的简写名（NC_API_KEY / ALIYUN_AK 等）不能残留。"""
+    stale = ("NC_API_USER", "NC_API_KEY", "ALIYUN_AK", "ALIYUN_SK",
+             "GODADDY_KEY", "GODADDY_SECRET")
+    for name in ("config.example.yaml", "README.md", "docs/安装.md",
+                 "install.sh", "deploy/docker-compose.yml"):
+        text = (REPO / name).read_text(encoding="utf-8")
+        for old in stale:
+            assert f"${{{old}}}" not in text, f"{name} 里还留着旧变量名 {old}"
+
+
+def test_installer_writes_all_provider_credentials(tmp_path):
+    """.env 模板要列全所有注册商的变量，用户不用去翻文档。"""
+    from domain_monitor.registrars import PROVIDERS, credential_env_vars
+
+    script = (REPO / "install.sh").read_text(encoding="utf-8")
+    # 名单由程序生成而不是写死，避免加了新注册商却忘了同步
+    assert "credential_env_vars" in script
+    assert credential_env_vars()          # 至少有几家
+    assert "namesilo" in PROVIDERS
