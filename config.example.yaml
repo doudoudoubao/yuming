@@ -12,7 +12,8 @@ log_level: "INFO"
 
 # ---------------------------------------------------------------- 监控的域名
 # 支持花括号写法一次写一批：mydream.{com,net,io}
-# 也能用预设合集：vps.{@two} 展开成 14 个常见两位后缀（domain_monitor tlds 可查看）
+# 也能用预设合集：vps.{@all} 一次盯全部无限制后缀（58 个）
+# 只要两位的用 @two，只要通用后缀用 @gtld（domain_monitor tlds 可查看）
 domains:
   - example.com                      # 简写形式
   - name: mydream.io                 # 完整形式，可以单独覆盖参数
@@ -27,7 +28,7 @@ domains:
 # stop_after_first: true 表示抢到其中任意一个之后，同组其余的自动停止监控。
 # prefixes:
 #   - name: mydream               # 也可以写成列表 [mydream, dreamy]
-#     tlds: ["@two", com, net]   # 支持 @合集，和具体后缀混写
+#     tlds: ["@all"]             # 支持 @合集，也能和具体后缀混写
 #     max_price: 80
 #     stop_after_first: true      # 默认就是 true
 #   - name: [short, tiny]

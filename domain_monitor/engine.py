@@ -941,9 +941,18 @@ class Engine:
 
         lines: list[str] = []
         if added:
-            lines.append("✅ 已加入监控：\n" + "\n".join(
-                f"<code>{escape_html(item)}</code>" for item in added
-            ))
+            # 用 @all 一次能加几十个，逐行列出会刷屏，多了就压成一行
+            if len(added) > 10:
+                preview = "、".join(added[:8])
+                lines.append(
+                    f"✅ 已加入监控 <b>{len(added)}</b> 个：\n"
+                    f"<code>{escape_html(preview)}</code> …… 等 {len(added)} 个\n"
+                    f"发 /list 看完整列表"
+                )
+            else:
+                lines.append("✅ 已加入监控：\n" + "\n".join(
+                    f"<code>{escape_html(item)}</code>" for item in added
+                ))
         if skipped:
             lines.append("ℹ️ 已在监控中：" + "、".join(
                 f"<code>{escape_html(item)}</code>" for item in skipped
@@ -983,14 +992,16 @@ class Engine:
             items = groups.get(key, [])
             preview = "、".join(items[:6])
             if len(items) > 6:
-                preview += f" …… 共 {len(items)} 个"
+                preview += " ……"
             mark = " ⚠️" if key in RESTRICTED_NOTES else ""
-            lines.append(f"<code>@{key}</code>{mark} — {escape_html(preview)}")
+            lines.append(
+                f"<code>@{key}</code>（{len(items)} 个）{mark}\n    {escape_html(preview)}"
+            )
         lines += [
             "",
-            "用法：<code>vps.{@two}</code> 一次盯一批",
-            "也能混写：<code>vps.{@two,com,net}</code>",
-            "发 <code>/tlds two</code> 看某个合集的完整内容",
+            "<code>vps.{@all}</code> 一次盯全部",
+            "<code>vps.{@two,com}</code> 合集和具体后缀可混写",
+            "<code>/tlds all</code> 看某个合集的完整内容",
         ]
         return "\n".join(lines)
 

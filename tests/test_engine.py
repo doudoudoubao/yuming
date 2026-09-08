@@ -1034,25 +1034,35 @@ async def test_cmd_add_rejects_malformed_pattern(rdap_server, storage):
     assert storage.list_domains() == []
 
 
+async def test_cmd_add_summarises_large_batches(rdap_server, storage):
+    """@all 一次能加几十个，逐行列出会刷屏。"""
+    engine = build_engine(rdap_server, storage)
+
+    reply = await engine.cmd_add(["vps.{@all}"])
+
+    assert "已加入监控" in reply
+    assert reply.count("\n") < 10          # 压成摘要而不是几十行
+    assert len(storage.list_domains()) > 40
+
+
 async def test_cmd_add_expands_tld_groups(rdap_server, storage):
     engine = build_engine(rdap_server, storage)
 
-    reply = await engine.cmd_add(["vps.{@classic}"])
+    reply = await engine.cmd_add(["vps.{@gtld}"])
 
     assert "vps.com" in reply
-    assert {item.domain for item in storage.list_domains()} == {
-        "vps.com", "vps.net", "vps.org"
-    }
+    names = {item.domain for item in storage.list_domains()}
+    assert {"vps.com", "vps.net", "vps.org", "vps.xyz"} <= names
 
 
 async def test_cmd_tlds_lists_and_details(rdap_server, storage):
     engine = build_engine(rdap_server, storage)
 
     listing = await engine.cmd_tlds(None)
-    assert "@two" in listing and "@classic" in listing
+    assert "@all" in listing and "@two" in listing and "@gtld" in listing
 
     detail = await engine.cmd_tlds("two")
-    assert "io" in detail and "14 个后缀" in detail
+    assert "io" in detail and "个后缀" in detail
 
     detail_at = await engine.cmd_tlds("@two")     # 带不带 @ 都认
     assert "io" in detail_at

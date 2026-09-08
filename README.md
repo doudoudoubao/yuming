@@ -16,7 +16,7 @@
 - **释放瞬间抢注** — 并发 + 重试下单，抢到立刻通知
 - **Telegram 双向控制** — 直接发域名即可加监控，另有 `/list` `/buy` `/pause` 等命令
 - **误报防护** — 查询失败绝不当可注册；可疑的状态跳变会自动复核后再行动
-- **前缀监控** — 一个名字盯多个后缀，内置常见后缀合集（`vps.{@two}` 一次盯 14 个两位后缀），抢到任意一个就收工
+- **前缀监控** — 一个名字盯多个后缀（`vps.{@all}` 一次盯 58 个），抢到任意一个就收工
 - **7 个注册商适配器** — NameSilo / Dynadot / GoDaddy / Namecheap / 阿里云 / 演练模式 / 任意外部脚本
 - **多通道比价 + 并发抢** — 下单前并发问每家要价挑最便宜的；冲刺时同时向多家下单提高命中率
 - **一堆防误操作的闸门** — 价格上限、每日预算、演练模式、TG 二次确认（详见[安全闸门](#安全闸门)）
@@ -96,36 +96,47 @@ gTLD 的标准删除流程（ICANN 到期恢复政策）：
 
 「这个名字我要，哪个后缀都行」是很常见的需求。两种写法：
 
-### 预设合集：`vps.{@two}`
+### 预设合集：`vps.{@all}`
 
 不想一个个列后缀，直接引用合集：
 
 ```yaml
 domains:
-  - "vps.{@two}"              # 一次盯 14 个常见两位后缀
+  - "vps.{@all}"              # 一次盯全部 58 个无限制后缀
+  - "vps.{@two}"              # 只要两位的
   - "vps.{@two,com,net}"      # 合集和具体后缀混写
 ```
 
-内置合集（`domain_monitor tlds` 可随时查看）：
+只有三档，不用记哪个是哪个：
 
-| 合集 | 内容 |
-|---|---|
-| `@two` | `io co ai me cc tv ly to sh gg im is la vc`（14 个两位后缀） |
-| `@two-more` | 上面 + 19 个小众岛国两位后缀（共 33 个）⚠️ |
-| `@classic` | `com net org` |
-| `@popular` | `com net org io co ai xyz app dev` |
-| `@startup` | `io ai dev app tech xyz co sh` |
-| `@europe` | `de fr it es nl se eu ch at dk be pl cz` ⚠️ |
-| `@china` | `cn com.cn net.cn` ⚠️ |
+| 合集 | 数量 | 内容 |
+|---|---|---|
+| `@all` | 58 | **一个合集打天下** —— 下面两档的并集 |
+| `@two` | 33 | 两位后缀：`io co ai me cc tv sh gg ly to im is la vc ws nu ag bz cx gd gl gs ki mn ms mu pw sc so st sx tc vg` |
+| `@gtld` | 25 | 非两位的通用后缀：`com net org info biz xyz app dev tech online site store shop cloud top icu vip pro club live fun space one link wiki` |
 
-别名：`@2` `@短` = `@two`，`@常用` = `@popular`。
+另有两组**有注册限制**的，故意不并进 `@all`：
+
+| 合集 | 内容 | 为什么单列 |
+|---|---|---|
+| `@europe` ⚠️ | `de fr it es nl se eu ch at dk be pl cz` | 多数要求当地实体或居民身份 |
+| `@china` ⚠️ | `cn com.cn net.cn` | 需要实名认证 |
+
+把它们混进 `@all` 只会让你加一堆永远注册不了的域名，所以要用得显式写。
+
+中文别名：`@全部` = `@all`，`@两位` = `@two`。
+早期的 `@two-more` `@classic` `@popular` `@startup` `@2` `@短` `@常用` 都还能用，
+指向合并后的对应组。
 
 ```bash
 domain_monitor tlds          # 列出全部合集
-domain_monitor tlds two      # 看 @two 的完整内容
+domain_monitor tlds all      # 看 @all 的完整内容
 ```
 
 Telegram 里发 `/tlds` 同样能查。
+
+> `vps.{@all}` 会一次加 58 个域名。默认 6 小时轮询一次的话完全不成问题，
+> 但要留意 `pattern_limit`（默认 200）—— `{a,b,c}.{@all}` 就是 174 个了。
 
 > ⚠️ **合集只是书写便利，不是「保证能注册」的清单。** 各注册商支持的后缀不一样，
 > 带 ⚠️ 的组还有额外限制：欧洲国别域名多数要求当地实体或居民身份，`.cn` 需要实名。
@@ -153,8 +164,8 @@ domains:
 Telegram 里直接发也行，命令行同理：
 
 ```
-你：  vps.{@two}
-机器人：✅ 已加入监控：vps.io / vps.co / vps.ai / ...（14 个）
+你：  vps.{@all}
+机器人：✅ 已加入监控 58 个：vps.com、vps.net、vps.org…… 等 58 个
 
 你：  mydream.{com,net,io}
 机器人：✅ 已加入监控：mydream.com / mydream.net / mydream.io
@@ -169,7 +180,7 @@ python -m domain_monitor check "mydream.{com,net,io}"
 ```yaml
 prefixes:
   - name: mydream                # 也能写成列表 [mydream, dreamy]
-    tlds: ["@two", com, net]       # tlds 里同样支持 @合集
+    tlds: ["@all"]                 # tlds 里同样支持 @合集
     max_price: 80                # 整组共用的价格上限
     stop_after_first: true       # 抢到任意一个就收工（默认）
 ```
@@ -608,7 +619,7 @@ TG_BOT_TOKEN=xxx TG_CHAT_ID=yyy docker compose up -d
 domain_monitor/
 ├── cli.py              命令行入口
 ├── config_edit.py      保留注释地修改 config.yaml（安装脚本用）
-├── tldgroups.py        预设后缀合集（@two / @classic ...）
+├── tldgroups.py        预设后缀合集（@all / @two / @gtld）
 ├── app.py              组件装配 + 优雅退出
 ├── engine.py           调度、状态机、抢注（核心）
 ├── rdap.py             RDAP 客户端（bootstrap 缓存 + 限速 + 退避）
@@ -627,7 +638,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 353 个测试，全部离线，约 9 秒
+.venv/bin/python -m pytest              # 360 个测试，全部离线，约 8 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

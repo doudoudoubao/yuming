@@ -304,9 +304,10 @@ def cmd_tlds(config: AppConfig, name: str | None) -> int:
         mark = " ⚠️" if key in RESTRICTED_NOTES else ""
         print(f"  {pad('@' + key, 12)}{preview}{mark}")
     print("\n用法：")
-    print("  domain_monitor add 'vps.{@two}'        一次加一批两位后缀")
+    print("  domain_monitor add 'vps.{@all}'        一次盯全部无限制后缀")
+    print("  domain_monitor add 'vps.{@two}'        只要两位的")
     print("  domain_monitor add 'vps.{@two,com}'    合集和具体后缀混写")
-    print("  domain_monitor tlds two                看某个合集的完整内容")
+    print("  domain_monitor tlds all                看某个合集的完整内容")
     if any(key in RESTRICTED_NOTES for key in groups):
         print("\n⚠️ 标记的组有注册限制，下单前先用 price 命令确认注册商是否支持。")
     return 0

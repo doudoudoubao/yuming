@@ -178,28 +178,71 @@ def test_builtin_groups_expand():
     assert "vps.io" in result and "vps.ai" in result
 
 
+def test_all_group_covers_everything_unrestricted():
+    """@all 是「一个合集打天下」，常见后缀都得在里面。"""
+    from domain_monitor.tldgroups import merge_groups
+
+    result = expand_pattern("vps.{@all}", groups=merge_groups(None))
+    for expected in ("vps.com", "vps.net", "vps.org", "vps.io",
+                     "vps.ai", "vps.co", "vps.xyz", "vps.app"):
+        assert expected in result
+
+
 def test_two_letter_group_is_all_two_letter():
     """@two 顾名思义，里面必须都是两位后缀。"""
     from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS
 
     for tld in BUILTIN_TLD_GROUPS["two"]:
         assert len(tld) == 2, f"{tld} 不是两位"
-    for tld in BUILTIN_TLD_GROUPS["two-more"]:
-        assert len(tld) == 2, f"{tld} 不是两位"
+
+
+def test_gtld_group_has_no_two_letter():
+    """@gtld 是「非两位」的那一档，混进两位后缀就说明分组乱了。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS
+
+    for tld in BUILTIN_TLD_GROUPS["gtld"]:
+        assert len(tld) > 2, f"{tld} 是两位，不该在 @gtld 里"
+
+
+def test_all_is_exactly_two_plus_gtld():
+    """@all 就是两档的并集——不多不少，避免又出现「超集套子集」的分层。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS as groups
+
+    assert set(groups["all"]) == set(groups["two"]) | set(groups["gtld"])
+    assert len(groups["all"]) == len(set(groups["all"]))     # 无重复
+
+
+def test_restricted_tlds_stay_out_of_all():
+    """有注册限制的后缀不能混进 @all，否则会加一堆永远注册不了的域名。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS as groups
+
+    for key in ("europe", "china"):
+        assert not (set(groups[key]) & set(groups["all"])), f"@{key} 混进了 @all"
+
+
+def test_legacy_group_names_still_work():
+    """早期写法（@two-more / @classic / @常用）不该因为合并而失效。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS as groups
+
+    assert groups["two-more"] == groups["two"]
+    assert groups["classic"] == groups["gtld"]
+    assert groups["常用"] == groups["gtld"]
+    assert groups["全部"] == groups["all"]
 
 
 def test_groups_and_literals_can_mix():
     from domain_monitor.tldgroups import merge_groups
 
-    result = expand_pattern("vps.{@classic,ai,io}", groups=merge_groups(None))
-    assert result == ["vps.com", "vps.net", "vps.org", "vps.ai", "vps.io"]
+    result = expand_pattern("vps.{com,net,@two}", groups=merge_groups(None))
+    assert result[:2] == ["vps.com", "vps.net"]
+    assert "vps.io" in result and "vps.ai" in result
 
 
 def test_overlapping_groups_dedupe():
     from domain_monitor.tldgroups import merge_groups
 
-    # @two 和 @startup 都含 io/co/ai，不该重复
-    result = expand_pattern("x.{@two,@startup}", groups=merge_groups(None))
+    # @two 和 @all 大量重叠，不该重复
+    result = expand_pattern("x.{@two,@all}", groups=merge_groups(None))
     assert len(result) == len(set(result))
 
 
@@ -235,10 +278,11 @@ def test_custom_group_alongside_builtins():
 
 def test_prefixes_tlds_accept_groups():
     config = load_config(
-        data={"prefixes": [{"name": "host", "tlds": ["@classic", "io"]}]}
+        data={"tld_groups": {"mini": ["com", "net"]},
+              "prefixes": [{"name": "host", "tlds": ["@mini", "io"]}]}
     )
     assert [item.name for item in config.domains] == [
-        "host.com", "host.net", "host.org", "host.io"
+        "host.com", "host.net", "host.io"
     ]
 
 
@@ -248,7 +292,7 @@ def test_prefixes_unknown_group_rejected():
 
 
 def test_prefixes_group_dedupes_with_literals():
-    config = load_config(data={"prefixes": [{"name": "x", "tlds": ["@classic", "com"]}]})
+    config = load_config(data={"prefixes": [{"name": "x", "tlds": ["@gtld", "com"]}]})
     names = [item.name for item in config.domains]
     assert names.count("x.com") == 1
 
@@ -268,6 +312,6 @@ def test_restricted_groups_are_flagged():
     """有注册限制的组必须带说明，否则用户会白花时间。"""
     from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS, RESTRICTED_NOTES
 
-    for key in ("europe", "china", "two-more"):
+    for key in ("europe", "china"):
         assert key in BUILTIN_TLD_GROUPS
         assert key in RESTRICTED_NOTES and RESTRICTED_NOTES[key]
