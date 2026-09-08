@@ -22,26 +22,33 @@
 
 ---
 
-## 5 分钟上手
+## 安装
+
+需要 **Python 3.10+** 和一台能长期开着的机器（VPS / 树莓派 / 家里的小主机）——
+抢注要在域名释放那一刻在线。
 
 ```bash
 git clone https://github.com/doudoudoubao/yuming.git
 cd yuming
-pip install -r requirements.txt
-
-# 生成配置文件
-python -m domain_monitor init config.yaml
-
-# 改 config.yaml：填上你想盯的域名
-# 然后自检一下，确认 RDAP / 注册商 / Telegram 都通
-python -m domain_monitor test
-
-# 先只监控、不下单，跑起来看看
-python -m domain_monitor run
+./install.sh
 ```
 
+脚本会问你要监控哪些域名、Telegram token（都能跳过），然后自动建虚拟环境、
+装依赖、生成配置、跑自检。装完直接能用：
+
+```bash
+.venv/bin/python -m domain_monitor check example.com   # 查一个域名
+.venv/bin/python -m domain_monitor run                 # 跑起来
+sudo ./install.sh --systemd                            # 开机自启
+```
+
+`.env` 里的密钥会被自动读取，不用手动 `source`。
+
+其它方式（**让 AI 帮你装**、手动安装、Docker）和排错见
+**[docs/安装.md](docs/安装.md)**。
+
 默认配置是**只监控不下单**（`purchase.enabled: false`），
-先跑通再考虑开抢注 —— 见下面的[开启真实下单](#开启真实下单)。
+先跑通再考虑开抢注 —— 见 [抢注要准备什么](#抢注要准备什么)。
 
 ---
 
@@ -500,6 +507,7 @@ TG_BOT_TOKEN=xxx TG_CHAT_ID=yyy docker compose up -d
 ```
 domain_monitor/
 ├── cli.py              命令行入口
+├── config_edit.py      保留注释地修改 config.yaml（安装脚本用）
 ├── app.py              组件装配 + 优雅退出
 ├── engine.py           调度、状态机、抢注（核心）
 ├── rdap.py             RDAP 客户端（bootstrap 缓存 + 限速 + 退避）
@@ -516,8 +524,9 @@ domain_monitor/
 ## 开发
 
 ```bash
-pip install -r requirements.txt pytest pytest-asyncio
-python -m pytest              # 278 个测试，全部离线，约 8 秒
+./install.sh --yes
+.venv/bin/pip install pytest pytest-asyncio
+.venv/bin/python -m pytest              # 278 个测试，全部离线，约 8 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

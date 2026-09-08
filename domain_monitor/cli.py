@@ -14,7 +14,14 @@ from .app import Application
 from .config import AppConfig, ConfigError, load_config
 from .models import DomainState
 from .registrars import available_providers
-from .utils import human_until, is_valid_domain, normalize_domain, pad, to_utc
+from .utils import (
+    human_until,
+    is_valid_domain,
+    load_dotenv,
+    normalize_domain,
+    pad,
+    to_utc,
+)
 
 logger = logging.getLogger("domain_monitor")
 
@@ -49,8 +56,29 @@ def find_config(explicit: str | None) -> str | None:
     return None
 
 
+def load_env_files(config_path: str | None) -> None:
+    """自动加载 .env，省得用户每次都要记得 source 一遍。
+
+    先找配置文件同目录，再找当前目录。真正的环境变量优先级更高。
+    """
+    candidates: list[Path] = []
+    if config_path:
+        candidates.append(Path(config_path).resolve().parent / ".env")
+    candidates.append(Path.cwd() / ".env")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        count = load_dotenv(candidate)
+        if count:
+            logger.debug("从 %s 加载了 %d 个环境变量", candidate, count)
+
+
 def build_config(args: argparse.Namespace) -> AppConfig:
     path = find_config(getattr(args, "config", None))
+    load_env_files(path)
     if path is None:
         # 没有配置文件也能跑只读命令，用一份全默认配置
         config = load_config(data={})

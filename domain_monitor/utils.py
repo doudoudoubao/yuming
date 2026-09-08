@@ -9,6 +9,7 @@ import re
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -144,6 +145,43 @@ def suffixes_of(name: str) -> list[str]:
     """由长到短返回所有后缀，供 RDAP bootstrap 做最长匹配。"""
     labels = domain_labels(name)
     return [".".join(labels[index:]) for index in range(1, len(labels))] or [name]
+
+
+def load_dotenv(path: str | os.PathLike[str]) -> int:
+    """把 .env 里的变量读进 os.environ，返回实际设置的条数。
+
+    已经存在的环境变量优先——真正的环境变量应该压过文件里的值。
+    只认最朴素的 ``KEY=VALUE``，够用且不引第三方依赖。
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return 0
+
+    count = 0
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        # 去掉成对的引号
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ[key] = value
+        count += 1
+    return count
 
 
 def expand_env(value: Any, *, strict: bool = False) -> Any:
