@@ -158,6 +158,8 @@ else
     echo "# 改完后重启服务生效。"
     echo "TG_BOT_TOKEN=${TG_TOKEN}"
     echo "TG_CHAT_ID=${TG_CHAT}"
+    echo "# 走 Telegram 镜像/反代时填，留空用官方地址"
+    echo "TG_API_BASE="
     echo
     echo "# 注册商凭据（要开启自动抢注时再填，先留空）"
     echo "# 只需要填你实际用的那一家。各家要填什么："
@@ -198,8 +200,8 @@ if [ "$SETUP_SYSTEMD" = 1 ]; then
   [ "$(id -u)" -eq 0 ] || fail "--systemd 需要 root：sudo ./install.sh --systemd"
   info "配置 systemd 开机自启"
   UNIT=/etc/systemd/system/domain-monitor.service
-  sed -e "s|/opt/domain-monitor/.venv/bin/python|$VPY|" \
-      -e "s|/opt/domain-monitor/config.yaml|$CONFIG_FILE|" \
+  sed -e "s|/opt/domain-monitor/.venv/bin/python|$VPY|g" \
+      -e "s|/opt/domain-monitor/config.yaml|$CONFIG_FILE|g" \
       -e "s|WorkingDirectory=.*|WorkingDirectory=$REPO_DIR|" \
       -e "s|EnvironmentFile=.*|EnvironmentFile=-$ENV_FILE|" \
       -e "s|^User=.*|User=$(stat -c '%U' "$REPO_DIR")|" \

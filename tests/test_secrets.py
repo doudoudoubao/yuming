@@ -266,3 +266,81 @@ async def test_reload_keeps_working_config_when_the_new_one_is_broken(tmp_path):
 async def test_reload_without_a_config_file(rdap_server, storage):
     engine = build_engine(rdap_server, storage)
     assert "不支持热重载" in await engine.cmd_reload()
+
+
+# ------------------------------------------------------------ 故障告警
+
+async def test_send_standalone_uses_env_only(monkeypatch):
+    """配置解析失败时也要能报警，所以不能依赖配置对象。"""
+    import domain_monitor.notify.telegram as tg
+
+    sent: list[str] = []
+
+    def handler(request):
+        body = json.loads(request.content or b"{}")
+        sent.append(body.get("text", ""))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    monkeypatch.setenv("TG_BOT_TOKEN", "t")
+    monkeypatch.setenv("TG_CHAT_ID", "42")
+
+    original = tg.TelegramClient.start
+
+    async def patched(self):
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        self._owns_client = True
+
+    monkeypatch.setattr(tg.TelegramClient, "start", patched)
+    try:
+        assert await tg.send_standalone("炸了") is True
+        assert sent == ["炸了"]
+    finally:
+        monkeypatch.setattr(tg.TelegramClient, "start", original)
+
+
+async def test_send_standalone_without_credentials(monkeypatch):
+    from domain_monitor.notify.telegram import send_standalone
+
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TG_CHAT_ID", raising=False)
+
+    assert await send_standalone("x") is False      # 静默失败，不抛异常
+
+
+async def test_send_standalone_honours_api_base(monkeypatch):
+    """走镜像/反代的用户，在最需要报警的时候不能因为地址不对而发不出去。"""
+    import domain_monitor.notify.telegram as tg
+
+    monkeypatch.setenv("TG_BOT_TOKEN", "t")
+    monkeypatch.setenv("TG_CHAT_ID", "42")
+    monkeypatch.setenv("TG_API_BASE", "https://my-mirror.example")
+
+    seen: list[str] = []
+
+    async def patched(self):
+        seen.append(self.config.api_base)
+        self._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, json={"ok": True, "result": {}})
+            )
+        )
+        self._owns_client = True
+
+    monkeypatch.setattr(tg.TelegramClient, "start", patched)
+    await tg.send_standalone("x")
+
+    assert seen == ["https://my-mirror.example"]
+
+
+async def test_send_standalone_never_raises(monkeypatch):
+    """报警本身失败，绝不能再制造一次故障。"""
+    import domain_monitor.notify.telegram as tg
+
+    monkeypatch.setenv("TG_BOT_TOKEN", "t")
+    monkeypatch.setenv("TG_CHAT_ID", "42")
+
+    async def boom(self):
+        raise RuntimeError("网络没了")
+
+    monkeypatch.setattr(tg.TelegramClient, "start", boom)
+    assert await tg.send_standalone("x") is False

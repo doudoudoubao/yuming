@@ -253,3 +253,53 @@ def test_test_command_points_at_registrar_setup(tmp_path, offline, capsys):
     cli.main(["-c", config, "test"])
     out = capsys.readouterr().out
     assert "domain-monitor registrar" in out
+
+
+def test_config_error_in_run_mode_alerts(tmp_path, monkeypatch, capsys):
+    """服务起不来时必须推送——否则手机上「没消息」和「没域名掉」一模一样。"""
+    from domain_monitor import cli as cli_module
+
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        cli_module, "alert_config_error",
+        lambda exc, source: alerts.append(str(exc)),
+    )
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("poll:\n  没这个键: 1\n", encoding="utf-8")
+
+    assert cli_module.main(["-c", str(bad), "run"]) == 2
+
+    assert alerts and "没这个键" in alerts[0]
+
+
+def test_config_error_in_read_only_command_does_not_alert(tmp_path, monkeypatch, capsys):
+    """跑 list / check 这类只读命令时配置写错，不该惊动 Telegram。"""
+    from domain_monitor import cli as cli_module
+
+    alerts: list[str] = []
+    monkeypatch.setattr(
+        cli_module, "alert_config_error",
+        lambda exc, source: alerts.append(str(exc)),
+    )
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("poll:\n  没这个键: 1\n", encoding="utf-8")
+
+    assert cli_module.main(["-c", str(bad), "list"]) == 2
+    assert alerts == []
+
+
+def test_notify_command_requires_a_message(capsys):
+    assert cli.main(["notify", " "]) == 2
+    assert "不能为空" in capsys.readouterr().err
+
+
+def test_systemd_unit_alerts_on_failure():
+    """进程死了自己没法报信，必须靠 systemd 触发。"""
+    from pathlib import Path
+
+    unit = (Path(__file__).resolve().parent.parent
+            / "deploy" / "domain-monitor.service").read_text(encoding="utf-8")
+
+    assert "ExecStopPost" in unit
+    assert "notify" in unit
+    assert "SERVICE_RESULT" in unit          # 正常停止时不打扰

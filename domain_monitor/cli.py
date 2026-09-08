@@ -13,6 +13,7 @@ from . import __version__
 from .app import Application
 from .config import AppConfig, ConfigError, load_config
 from .models import DomainState
+from .notify.telegram import send_standalone
 from .registrars import available_providers
 from .tldgroups import RESTRICTED_NOTES, group_names
 from .utils import (
@@ -21,6 +22,7 @@ from .utils import (
     PatternError,
     display_domain,
     display_width,
+    escape_html,
     expand_patterns,
     load_dotenv,
     normalize_domain,
@@ -306,6 +308,44 @@ async def cmd_list(config: AppConfig) -> int:
     return 0
 
 
+def alert_config_error(exc: Exception, *, source: str) -> None:
+    """配置炸了也要想办法通知到人。
+
+    这时配置对象根本没解析出来，所以直接用 .env 里的
+    TG_BOT_TOKEN / TG_CHAT_ID 发。发不出去就算了，不能因为报警失败再挂一次。
+    """
+    try:
+        sent = asyncio.run(
+            send_standalone(
+                f"🚨 <b>域名监控启动失败</b>\n\n"
+                f"{escape_html(str(exc))}\n\n"
+                f"来源：<code>{escape_html(source)}</code>\n"
+                f"⚠️ 服务没有在运行，现在<b>不会</b>监控任何域名。"
+            )
+        )
+        if sent:
+            print("  （已通过 Telegram 发出告警）", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - 报警本身不能再制造故障
+        pass
+
+
+def cmd_notify(message: str) -> int:
+    """往 Telegram 发一条消息。
+
+    给 systemd 的 OnFailure / ExecStopPost 用：进程都死了没法自己报信，
+    只能靠外部触发。
+    """
+    if not message.strip():
+        print("✗ 消息不能为空", file=sys.stderr)
+        return 2
+    ok = asyncio.run(send_standalone(message))
+    if ok:
+        print("✓ 已发送")
+        return 0
+    print("✗ 发送失败（检查 TG_BOT_TOKEN / TG_CHAT_ID 和网络）", file=sys.stderr)
+    return 1
+
+
 def cmd_registrar(config: AppConfig, name: str | None) -> int:
     """列出可用的注册商，或某一家的开通说明。
 
@@ -513,6 +553,9 @@ def build_parser() -> argparse.ArgumentParser:
     registrar = sub.add_parser("registrar", help="查看注册商与开通说明")
     registrar.add_argument("name", nargs="?", help="注册商名，如 namesilo")
 
+    notify = sub.add_parser("notify", help="往 Telegram 发一条消息（供 systemd 告警用）")
+    notify.add_argument("message", nargs="+", help="消息内容")
+
     init = sub.add_parser("init", help="生成一份配置文件模板")
     init.add_argument("path", nargs="?", default="config.yaml")
 
@@ -527,10 +570,18 @@ def main(argv: list[str] | None = None) -> int:
         setup_logging("INFO")
         return cmd_init(args.path)
 
+    if args.command == "notify":
+        setup_logging("WARNING")
+        load_env_files(find_config(getattr(args, "config", None)))
+        return cmd_notify(" ".join(args.message))
+
     try:
         config = build_config(args)
     except ConfigError as exc:
         print(f"✗ 配置错误: {exc}", file=sys.stderr)
+        # 常驻模式下配置炸了 = 服务起不来，必须让人知道
+        if (args.command or "run") == "run":
+            alert_config_error(exc, source=find_config(getattr(args, "config", None)) or "默认配置")
         return 2
 
     setup_logging(config.log_level, config.log_file)

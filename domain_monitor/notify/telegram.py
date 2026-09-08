@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 import uuid
@@ -366,6 +367,37 @@ class TelegramClient:
             text=truncate(text, MAX_MESSAGE),
             parse_mode="HTML",
         )
+
+
+async def send_standalone(text: str, *, quiet: bool = False) -> bool:
+    """不依赖配置对象，直接用环境变量发一条消息。
+
+    配置解析失败时也要能报警——那种时候恰恰最需要通知：
+    服务起不来，而「没消息」和「没域名掉」在手机上看是一样的。
+    """
+    token = os.environ.get("TG_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TG_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return False
+
+    # 配置解析失败时读不到 telegram.api_base，用环境变量兜底，
+    # 否则走镜像 / 反代的用户在最需要报警的时候恰恰发不出去
+    api_base = os.environ.get("TG_API_BASE", "").strip()
+    config = TelegramConfig(
+        enabled=True,
+        bot_token=token,
+        chat_id=chat_id,
+        **({"api_base": api_base} if api_base else {}),
+    )
+    client = TelegramClient(config)
+    try:
+        await client.start()
+        return await client.send(text, disable_notification=quiet) is not None
+    except Exception as exc:  # noqa: BLE001 - 报警失败不该再抛异常
+        logger.warning("独立通知发送失败: %s", exc)
+        return False
+    finally:
+        await client.close()
 
 
 class Notifier:

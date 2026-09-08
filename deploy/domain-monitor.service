@@ -22,6 +22,14 @@ ExecStart=/opt/domain-monitor/.venv/bin/python -m domain_monitor -c /opt/domain-
 
 Restart=always
 RestartSec=10
+
+# 进程死了自己没法报信，只能靠 systemd 触发。
+# $SERVICE_RESULT 不是 success 时才发，正常停止不打扰。
+ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" = success ] || \
+  /opt/domain-monitor/.venv/bin/python -m domain_monitor \
+  -c /opt/domain-monitor/config.yaml notify \
+  "🔴 域名监控服务异常退出（$SERVICE_RESULT / 退出码 $EXIT_STATUS），已停止监控。用 systemctl status domain-monitor 查看" || true'
+
 # 抢注期间被 OOM 杀掉的代价很大，降低被选中的概率
 OOMScoreAdjust=-500
 
