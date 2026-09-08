@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 class DryRunRegistrar(Registrar):
     name = "dryrun"
+    display_name = "演练（假注册商）"
+    signup_url = ""
+    payment = "不花钱"
+    required_options = ()
+    needs_contact = False
+    notes = (
+        "默认值，永远不会产生真实订单，用来跑通链路",
+    )
     supports_price = True
 
     def __init__(self, *args, **kwargs) -> None:

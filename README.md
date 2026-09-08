@@ -270,6 +270,35 @@ python -m domain_monitor test        # 会给你发一条测试消息
 
 ---
 
+## 在哪里下单？
+
+**本程序自己不卖域名。** 它只做两件事：盯着域名什么时候释放，然后在那一刻
+调用**你自己的注册商账号**的 API 去下单。所以你需要先去某一家开户。
+
+```bash
+domain-monitor registrar              # 看有哪些可选、各需要什么
+domain-monitor registrar namesilo     # 看某一家的完整开通说明和配置写法
+```
+
+```
+  provider    注册商            扣款方式                必填
+  ──────────────────────────────────────────────────────────────────
+  namesilo    NameSilo          账户余额（需预先充值）  api_key
+  dynadot     Dynadot           账户余额（需预先充值）  api_key
+  aliyun      阿里云 / 万网     账户余额（自动扣款）    access_key_id、…
+  godaddy     GoDaddy           账户绑定的支付方式      api_key、api_secret + 联系人资料
+  namecheap   Namecheap         账户余额（需预先充值）  api_user、api_key、client_ip + 联系人资料
+  exec        外部脚本          取决于你的脚本          command
+  dryrun      演练（假注册商）  不花钱                  —
+
+  当前配置的是：dryrun（演练适配器，不会真的下单）
+```
+
+`domain-monitor registrar <名字>` 会直接给出可以照抄的配置片段、
+密钥该写进哪个文件，以及那家特有的坑（比如 Namecheap 必须把出口 IP 加白名单）。
+
+没内置的注册商用 `exec` 适配器接你自己的脚本。
+
 ## 注册商配置
 
 | provider | 下单方式 | 适合谁 | 注意 |
@@ -666,6 +695,7 @@ python -m domain_monitor [-c 配置文件] <子命令>
 | `add` / `rm` / `list` | 管理监控列表 |
 | `log [-n 数量]` | 查看事件流 |
 | `tlds [合集名]` | 查看预设的后缀合集 |
+| `registrar [名字]` | 查看注册商与开通说明 |
 | `init [路径]` | 生成配置模板 |
 
 ```bash

@@ -223,6 +223,9 @@ async def cmd_test(config: AppConfig) -> int:
             row("DNS 探测", "不可用，冲刺会慢一些（pip install dnspython）", "!")
 
         print(f"\n【注册商】{len(app.pool)} 个通道")
+        if all(item.name == "dryrun" for item in app.pool):
+            row("提示", "当前是演练适配器，不会真的下单", "!")
+            row("", "看怎么接真实注册商：domain-monitor registrar")
         for registrar, healthy, message in await app.pool.ping_all():
             # 适配器返回的消息常带 "名字: " 前缀，标签已经显示过了，去掉免得重复
             prefix = f"{registrar.name}: "
@@ -300,6 +303,74 @@ async def cmd_list(config: AppConfig) -> int:
                 f"  {pad(shown[item.domain], width)}{pad(item.state.label, 14)}"
                 f"{pad(phase, 8)}{drop}"
             )
+    return 0
+
+
+def cmd_registrar(config: AppConfig, name: str | None) -> int:
+    """列出可用的注册商，或某一家的开通说明。
+
+    本程序自己不卖域名——下单一律通过注册商的 API 完成，
+    所以必须先去某一家开户、充值、开 API，再把凭据填进配置。
+    """
+    from .registrars import PROVIDERS
+
+    if name:
+        key = name.strip().lower()
+        provider = PROVIDERS.get(key)
+        if provider is None:
+            print(f"✗ 没有 {key} 这个注册商。不带参数运行可查看全部。", file=sys.stderr)
+            return 2
+
+        print(f"\n{provider.display_name}（provider: {key}）\n")
+        if provider.signup_url:
+            print(f"  开户 / 开 API　{provider.signup_url}")
+        print(f"  扣款方式　　　{provider.payment}")
+        print(f"  支持查价　　　{'是' if provider.supports_price else '否'}")
+        if provider.notes:
+            print("\n  注意")
+            for note in provider.notes:
+                print(f"    · {note}")
+
+        print("\n  配置写法\n")
+        print("    registrar:")
+        print(f"      provider: {key}")
+        if provider.required_options:
+            print("      options:")
+            for option in provider.required_options:
+                placeholder = "${" + f"{key.upper()}_{option.upper()}" + "}"
+                print(f"        {option}: \"{placeholder}\"")
+        if provider.needs_contact:
+            print("      contact:            # 注册域名要提交的注册人资料")
+            for field, sample in (
+                ("first_name", "San"), ("last_name", "Zhang"),
+                ("email", "you@example.com"), ("phone", "+86.13800138000"),
+                ("address1", "XX 路 1 号"), ("city", "Shanghai"),
+                ("state", "Shanghai"), ("postal_code", "200000"), ("country", "CN"),
+            ):
+                print(f"        {field}: \"{sample}\"")
+        if provider.required_options:
+            print("\n  密钥写进项目根目录的 .env（权限 600），不要写进 config.yaml：")
+            for option in provider.required_options:
+                print(f"    {key.upper()}_{option.upper()}=你的值")
+        print()
+        return 0
+
+    print("\n本程序自己不卖域名。下单是通过下面某一家的 API 完成的，")
+    print("所以你需要先去其中一家开户、充值、开 API。\n")
+    print(f"  {pad('provider', 12)}{pad('注册商', 18)}{pad('扣款方式', 24)}必填")
+    print("  " + "─" * 74)
+    for key, provider in sorted(PROVIDERS.items()):
+        need = "、".join(provider.required_options) or "—"
+        if provider.needs_contact:
+            need += " + 联系人资料"
+        print(
+            f"  {pad(key, 12)}{pad(provider.display_name, 18)}"
+            f"{pad(provider.payment, 24)}{need}"
+        )
+    current = (config.registrar_configs[0].provider or "dryrun").lower()
+    print(f"\n  当前配置的是：{current}", end="")
+    print("（演练适配器，不会真的下单）" if current == "dryrun" else "")
+    print("\n  看某一家的详细开通说明：domain-monitor registrar namesilo\n")
     return 0
 
 
@@ -439,6 +510,9 @@ def build_parser() -> argparse.ArgumentParser:
     tlds = sub.add_parser("tlds", help="查看预设的后缀合集")
     tlds.add_argument("name", nargs="?", help="合集名，如 two")
 
+    registrar = sub.add_parser("registrar", help="查看注册商与开通说明")
+    registrar.add_argument("name", nargs="?", help="注册商名，如 namesilo")
+
     init = sub.add_parser("init", help="生成一份配置文件模板")
     init.add_argument("path", nargs="?", default="config.yaml")
 
@@ -476,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     # 同步子命令单独处理，不用绕 asyncio
     if command == "tlds":
         return cmd_tlds(config, args.name)
+    if command == "registrar":
+        return cmd_registrar(config, args.name)
     runner = runners.get(command)
     if runner is None:  # pragma: no cover - argparse 已经拦住了
         parser.print_help()

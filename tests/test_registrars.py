@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from domain_monitor.config import PurchaseConfig, RegistrarConfig
-from domain_monitor.registrars import available_providers, build_registrar
+from domain_monitor.registrars import PROVIDERS, available_providers, build_registrar
 from domain_monitor.registrars.aliyun import sign_params
 from domain_monitor.registrars.base import RegistrarError
 
@@ -365,3 +365,51 @@ async def test_exec_timeout(tmp_path):
         result = await registrar.register("a.com", PurchaseConfig())
     assert result.success is False
     assert "超时" in result.message
+
+
+def test_every_provider_declares_how_to_set_it_up():
+    """每个适配器都要能回答「我需要提供什么」，否则用户只能翻源码。"""
+    for name, provider in PROVIDERS.items():
+        assert provider.display_name and provider.display_name != "未命名", name
+        assert provider.payment and provider.payment != "未知", name
+
+
+def test_real_providers_declare_required_credentials():
+    """真实注册商必须声明必填项，否则用户配了一半才发现少东西。"""
+    for name in ("namesilo", "dynadot", "godaddy", "namecheap", "aliyun"):
+        provider = PROVIDERS[name]
+        assert provider.required_options, f"{name} 没声明必填项"
+        assert provider.signup_url.startswith("https://"), f"{name} 没给开户地址"
+
+
+def test_declared_options_match_what_the_code_reads():
+    """声明的必填项必须真的是代码里 require_option 读的那些键。
+
+    两边对不上的话，用户照着填完仍然会报「缺少配置」。
+    """
+    import inspect
+    import re
+
+    from domain_monitor.registrars import PROVIDERS
+
+    for name in ("namesilo", "dynadot", "godaddy", "namecheap", "aliyun"):
+        provider = PROVIDERS[name]
+        source = inspect.getsource(inspect.getmodule(provider))
+        actually_required = set(re.findall(r'require_option\(\s*["\'](\w+)["\']', source))
+        declared = set(provider.required_options)
+        assert declared == actually_required, (
+            f"{name} 声明的必填项 {sorted(declared)} "
+            f"与代码实际读取的 {sorted(actually_required)} 不一致"
+        )
+
+
+def test_contact_requirement_matches_the_code():
+    """声明「需要联系人资料」的，代码里必须真的读了 contact。"""
+    import inspect
+
+    for name, provider in PROVIDERS.items():
+        source = inspect.getsource(inspect.getmodule(provider))
+        uses_contact = "require_contact(" in source
+        assert provider.needs_contact == uses_contact, (
+            f"{name} 的 needs_contact={provider.needs_contact} 与代码不符"
+        )

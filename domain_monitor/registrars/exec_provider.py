@@ -50,6 +50,18 @@ def _kill_process_group(process: "asyncio.subprocess.Process") -> None:
 
 class ExecRegistrar(Registrar):
     name = "exec"
+    display_name = "外部脚本"
+    signup_url = ""
+    payment = "取决于你的脚本"
+    required_options = (
+        "command",
+    )
+    needs_contact = False
+    notes = (
+        "用来接任何没有内置适配器的注册商",
+        "域名以第一个位置参数和 DM_DOMAIN 环境变量传入",
+        "退出码 0=成功，2=不可重试的硬错误",
+    )
     supports_price = False
 
     def _command(self, key: str) -> list[str]:

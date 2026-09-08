@@ -42,6 +42,18 @@ MICRO = 1_000_000.0
 
 class GoDaddyRegistrar(Registrar):
     name = "godaddy"
+    display_name = "GoDaddy"
+    signup_url = "https://developer.godaddy.com"
+    payment = "账户绑定的支付方式"
+    required_options = (
+        "api_key",
+        "api_secret",
+    )
+    needs_contact = True
+    notes = (
+        "生产环境 API 有账户门槛（需持有一定数量域名）",
+        "先用 ote: true 在沙箱把流程跑通",
+    )
     supports_price = True
 
     @property

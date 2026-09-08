@@ -38,6 +38,20 @@ CONTACT_PREFIXES = ("Registrant", "Tech", "Admin", "AuxBilling")
 
 class NamecheapRegistrar(Registrar):
     name = "namecheap"
+    display_name = "Namecheap"
+    signup_url = "https://ap.www.namecheap.com/settings/tools/apiaccess/"
+    payment = "账户余额（需预先充值）"
+    required_options = (
+        "api_user",
+        "api_key",
+        "client_ip",
+    )
+    needs_contact = True
+    notes = (
+        "必须把服务器出口 IP 加进后台白名单，client_ip 填错是最常见的失败原因",
+        "查出口 IP：curl ifconfig.me",
+        "开通 API 需账户有过消费或余额达标",
+    )
     supports_price = True
 
     @property

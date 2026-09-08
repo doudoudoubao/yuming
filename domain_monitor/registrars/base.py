@@ -45,6 +45,16 @@ class Registrar:
     name = "base"
     supports_price = False
 
+    # ↓ 下面这些是给 `domain-monitor registrar` 用的开通说明。
+    #   本程序自己不卖域名，下单一律通过这些注册商的 API 完成，
+    #   所以用户必须先去某一家开户、充值、开 API。
+    display_name = "未命名"
+    signup_url = ""
+    payment = "未知"                       # 怎么扣款
+    required_options: tuple[str, ...] = ()  # registrar.options 里必填的键
+    needs_contact = False                   # 是否需要 registrar.contact 联系人资料
+    notes: tuple[str, ...] = ()             # 开通时的坑
+
     def __init__(self, config: RegistrarConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
         # 池子里区分同一家的多个账号，默认与 name 相同

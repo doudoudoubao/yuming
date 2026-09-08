@@ -202,3 +202,54 @@ def test_list_shows_chinese_phase_labels(tmp_path, offline, capsys):
 
     assert "冲刺" in out
     assert "sprint" not in out
+
+
+def test_registrar_command_lists_all(tmp_path, offline, capsys):
+    """用户问「在哪里下单」时，这条命令要能一次说清。"""
+    config = write_config(tmp_path)
+
+    assert cli.main(["-c", config, "registrar"]) == 0
+    out = capsys.readouterr().out
+
+    assert "本程序自己不卖域名" in out
+    for provider in ("namesilo", "dynadot", "godaddy", "namecheap", "aliyun"):
+        assert provider in out
+    assert "当前配置的是：dryrun" in out
+
+
+def test_registrar_detail_is_copy_pasteable(tmp_path, offline, capsys):
+    config = write_config(tmp_path)
+
+    assert cli.main(["-c", config, "registrar", "namecheap"]) == 0
+    out = capsys.readouterr().out
+
+    assert "provider: namecheap" in out
+    for option in ("api_user", "api_key", "client_ip"):
+        assert option in out
+    assert "contact:" in out                    # 这家需要联系人资料
+    assert "client_ip 填错是最常见的失败原因" in out
+    assert "不要写进 config.yaml" in out         # 密钥去向
+
+
+def test_registrar_detail_without_contact(tmp_path, offline, capsys):
+    config = write_config(tmp_path)
+
+    cli.main(["-c", config, "registrar", "namesilo"])
+    out = capsys.readouterr().out
+
+    assert "api_key" in out
+    assert "contact:" not in out                # NameSilo 用账户默认资料
+
+
+def test_registrar_unknown_name(tmp_path, offline, capsys):
+    config = write_config(tmp_path)
+    assert cli.main(["-c", config, "registrar", "nope"]) == 2
+    assert "没有 nope" in capsys.readouterr().err
+
+
+def test_test_command_points_at_registrar_setup(tmp_path, offline, capsys):
+    """自检发现还在用演练适配器时，要告诉用户下一步去哪。"""
+    config = write_config(tmp_path)
+    cli.main(["-c", config, "test"])
+    out = capsys.readouterr().out
+    assert "domain-monitor registrar" in out

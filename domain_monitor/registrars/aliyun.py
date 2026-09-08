@@ -63,6 +63,19 @@ def sign_params(params: dict[str, Any], secret: str, method: str = "GET") -> str
 
 class AliyunRegistrar(Registrar):
     name = "aliyun"
+    display_name = "阿里云 / 万网"
+    signup_url = "https://dc.console.aliyun.com"
+    payment = "账户余额（自动扣款）"
+    required_options = (
+        "access_key_id",
+        "access_key_secret",
+        "registrant_profile_id",
+    )
+    needs_contact = False
+    notes = (
+        "registrant_profile_id 是后台「信息模板」的 ID，必须已完成实名认证",
+        ".cn 等国别域名需要实名，国内首选",
+    )
     supports_price = True
 
     async def _call(self, action: str, **params: Any) -> dict[str, Any]:

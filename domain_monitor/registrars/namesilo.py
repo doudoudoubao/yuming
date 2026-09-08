@@ -42,6 +42,17 @@ def _text(node: ElementTree.Element | None, default: str = "") -> str:
 
 class NameSiloRegistrar(Registrar):
     name = "namesilo"
+    display_name = "NameSilo"
+    signup_url = "https://www.namesilo.com"
+    payment = "账户余额（需预先充值）"
+    required_options = (
+        "api_key",
+    )
+    needs_contact = False
+    notes = (
+        "后台 → API Manager 生成 API Key",
+        "续费价与注册价接近，适合长期持有",
+    )
     supports_price = True
 
     @property

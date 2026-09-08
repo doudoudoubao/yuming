@@ -50,6 +50,17 @@ def _response_code(header: dict[str, Any]) -> str:
 
 class DynadotRegistrar(Registrar):
     name = "dynadot"
+    display_name = "Dynadot"
+    signup_url = "https://www.dynadot.com"
+    payment = "账户余额（需预先充值）"
+    required_options = (
+        "api_key",
+    )
+    needs_contact = False
+    notes = (
+        "后台 → Tools → API 里开启，并把服务器出口 IP 加进白名单",
+        "响应快，抢注圈子里用得多",
+    )
     supports_price = True
 
     async def _call(self, command: str, **params: Any) -> dict[str, Any]:
