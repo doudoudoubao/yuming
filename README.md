@@ -260,6 +260,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 | `/buy <域名>` | 立即尝试注册 |
 | `/pause` / `/resume` | 暂停 / 恢复自动抢注（仍继续监控） |
 | `/log [数量]` | 最近事件 |
+| `/auto <域名> [开\|关\|默认]` | 单独开关某个域名的自动下单 |
 | `/tlds [合集名]` | 查看预设的后缀合集 |
 | `/help [主题]` | 使用说明，分 3 条发送；`/help 模式`、`/help 抢注`、`/help 状态` 只看一节 |
 
@@ -512,6 +513,7 @@ registrars:
 | 单价上限 | `purchase.max_price` | 50 | 超过就放弃（防溢价域名天价） |
 | 每日预算 | `purchase.daily_budget` | 200 | 当天累计**花费**超了就停手 |
 | 每日笔数 | `purchase.max_per_day` | 3 | 当天最多买几个 —— 见下方说明 |
+| 逐个开关 | `auto_buy` / `/auto` | 跟随全局 | 按域名或按组决定要不要自动买 |
 | 重复购买保护 | 自动 | — | 同一域名成功买过就不会再买 |
 | 二次确认 | `purchase.confirm_via_telegram` | `false` | 下单前要在 TG 点按钮（会慢几秒） |
 | 运行时暂停 | `/pause` | — | 随时刹车，不用重启 |
@@ -548,8 +550,36 @@ registrars:
 启动时如果检测到有域名当前就是可注册状态，会先推送一条警告告诉你
 **哪些会被立刻买走**，想反悔就发 `/pause`。
 
-想按域名精细控制的话，先只把要抢的那几个放进监控列表，
-其余的等抢完再加。
+#### 只想抢其中几个：逐个域名的开关
+
+`auto_buy` 可以按域名或按组单独指定，优先级高于全局默认：
+
+```yaml
+purchase:
+  auto_buy_default: false      # 白名单模式：默认只通知不买
+
+domains:
+  - name: vps.com
+    auto_buy: true             # 只有它会被自动买
+
+prefixes:
+  - name: vps
+    tlds: ["@all"]             # 其余 57 个只监控只通知
+```
+
+运行时也能随时改，不用重启：
+
+```
+/auto vps.net 开      只抢这个
+/auto vps.net 关      只通知，不自动买
+/auto vps.net 默认    恢复跟随全局
+/auto vps.net         查看当前设置
+```
+
+`/list` 里 🛒 表示会自动买，🔕 表示只通知（只在开了下单功能时显示）。
+
+被跳过的域名**仍然会推送通知**，并附上 `/buy` 命令供你手动决定——
+不买不等于不告诉你。`/buy` 是明确指令，不受这个开关限制。
 
 ### 开启真实下单
 
@@ -672,7 +702,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 392 个测试，全部离线，约 10 秒
+.venv/bin/python -m pytest              # 420 个测试，全部离线，约 11 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

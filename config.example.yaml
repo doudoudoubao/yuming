@@ -17,6 +17,7 @@ log_level: "INFO"
 domains:
   - example.com                      # 简写形式
   - name: mydream.io                 # 完整形式，可以单独覆盖参数
+    # auto_buy: true                 # 单独指定这个域名是否自动下单
     max_price: 80                    # 这个域名最多愿意花多少钱
     years: 1
     note: "主力目标"
@@ -31,6 +32,7 @@ domains:
 #     tlds: ["@all"]             # 支持 @合集，也能和具体后缀混写
 #     max_price: 80
 #     stop_after_first: true      # 默认就是 true
+#     auto_buy: false             # 整组只通知不买
 #   - name: [short, tiny]
 #     tlds: [com]
 #     stop_after_first: false     # 每个都想要，就关掉
@@ -107,6 +109,9 @@ purchase:
   max_per_day: 3            # 每日最多买几个（笔数）——这条比金额上限更重要！
                             # 你盯的一批后缀里往往有好几个本来就没人注册，
                             # 开关一开会被一次性全买走，金额预算拦不住
+  auto_buy_default: true    # 没单独标 auto_buy 的域名，默认自动买吗？
+                            # 改成 false 就是「白名单模式」：
+                            # 只有显式写了 auto_buy: true 的才会被下单
   currency: "USD"
   max_attempts: 120         # 单次冲刺最多下单几次
   attempt_interval: 0.5     # 两轮下单之间的间隔

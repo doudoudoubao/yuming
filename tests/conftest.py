@@ -13,11 +13,20 @@ from domain_monitor.config import load_config
 from domain_monitor.storage import Storage
 from domain_monitor.utils import iso, utcnow
 
+# 夹具的 bootstrap 要覆盖内置合集里的后缀。漏了的话会落到兜底入口，
+# 被「兜底 404 不算可注册」的防护判成查询失败，测试现象会很迷惑。
+from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS as _GROUPS
+
+_ALL_TLDS = sorted({
+    tld for name in ("all", "europe", "china") for tld in _GROUPS[name]
+} | {"com", "net", "io", "test", "unknowntld"} - {"unknowntld"})
+
 BOOTSTRAP = {
     "version": "1.0",
     "services": [
         [["com", "net"], ["https://rdap.verisign.com/com/v1/"]],
-        [["io"], ["https://rdap.nic.io/"]],
+        [[tld for tld in _ALL_TLDS if tld not in ("com", "net")],
+         ["https://rdap.example/"]],
     ],
 }
 

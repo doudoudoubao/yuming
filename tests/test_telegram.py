@@ -61,6 +61,7 @@ class StubController:
     async def cmd_pause(self, p): self.calls.append(("pause", p)); return "PAUSED"
     async def cmd_log(self, n): self.calls.append(("log", n)); return "LOG"
     async def cmd_tlds(self, name): self.calls.append(("tlds", name)); return "TLDS"
+    async def cmd_auto(self, d, v): self.calls.append(("auto", d, v)); return "AUTO"
 
 
 # ------------------------------------------------------------------- 客户端
@@ -735,3 +736,35 @@ def test_no_english_state_or_phase_leaks_in_help():
     for leak in ("idle", "watch", "near", "sprint",
                  "registered", "pending_delete", "redemption", "available"):
         assert leak not in joined, f"/help 里漏出了内部标识 {leak}"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/auto a.com", ("auto", "a.com", None)),
+        ("/auto a.com 开", ("auto", "a.com", "开")),
+        ("/auto a.com off", ("auto", "a.com", "off")),
+        ("/自动 a.com 关", ("auto", "a.com", "关")),
+    ],
+)
+async def test_auto_command_routing(text, expected):
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message(text))
+
+    assert controller.calls == [expected]
+
+
+async def test_auto_without_domain_shows_usage():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("/auto"))
+
+    assert controller.calls == []
+    assert "用法" in recorder.sent[0]["text"]

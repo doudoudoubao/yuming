@@ -315,3 +315,35 @@ def test_restricted_groups_are_flagged():
     for key in ("europe", "china"):
         assert key in BUILTIN_TLD_GROUPS
         assert key in RESTRICTED_NOTES and RESTRICTED_NOTES[key]
+
+
+# ------------------------------------------------- 自动下单开关的配置解析
+
+def test_auto_buy_is_tri_state():
+    """没写 = 跟随全局（None），写了才是明确的 true/false。"""
+    config = load_config(
+        data={"domains": [{"name": "a.com", "auto_buy": True},
+                          {"name": "b.com", "auto_buy": False},
+                          "c.com"]}
+    )
+    assert [item.auto_buy for item in config.domains] == [True, False, None]
+
+
+def test_auto_buy_rejects_non_boolean():
+    with pytest.raises(ConfigError, match="只能是 true / false"):
+        load_config(data={"domains": [{"name": "a.com", "auto_buy": "yes"}]})
+
+
+def test_prefix_auto_buy_applies_to_whole_group():
+    config = load_config(
+        data={"prefixes": [{"name": "vps", "tlds": ["com", "io"], "auto_buy": True}]}
+    )
+    assert all(item.auto_buy is True for item in config.domains)
+
+
+def test_pattern_expansion_carries_auto_buy():
+    config = load_config(
+        data={"domains": [{"name": "vps.{com,net,io}", "auto_buy": False}]}
+    )
+    assert len(config.domains) == 3
+    assert all(item.auto_buy is False for item in config.domains)

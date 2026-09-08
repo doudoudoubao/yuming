@@ -60,6 +60,7 @@ HELP_SECTIONS["命令"] = """🌐 <b>域名监控</b> · 使用说明 1/3
 /add　加入监控
 /del　移出监控
 /buy　立刻尝试注册
+/auto　单独开关某个域名的自动下单
 /pause　暂停抢注 · /resume　恢复
 
 <b>说明书</b>
@@ -107,10 +108,18 @@ HELP_SECTIONS["抢注"] = """🛒 使用说明 3/3 · <b>花钱规则与安全</
 要开自动抢注得改服务器上的配置，
 并且建议先用演练模式跑几天再来真的。
 
-<b>⚠️ 开关是全局的</b>
+<b>⚠️ 开关默认是全局的</b>
 开启后，监控列表里<b>任何一个</b>变成可注册的域名都会被下单，
 包括你加进来时就已经空着的那些。盯一批后缀时尤其要留意。
 所以有「每天最多买几个」这道闸，默认只有 3 个。
+
+<b>只想抢其中几个？</b>
+/auto 域名 开　只有它会自动买
+/auto 域名 关　只通知，不自动买
+/auto 域名　　 查看当前设置
+/list 里 🛒 表示会自动买，🔕 表示只通知。
+在服务器配置里把 auto_buy_default 改成 false，
+就变成白名单模式：只有明确开过的才会被买。
 
 <b>花钱前的几道闸</b>
 · 每天最多买 3 个（笔数，可调）
@@ -186,6 +195,7 @@ BOT_COMMANDS = [
     {"command": "buy", "description": "立即尝试注册"},
     {"command": "pause", "description": "暂停自动抢注"},
     {"command": "resume", "description": "恢复自动抢注"},
+    {"command": "auto", "description": "开关某个域名的自动下单"},
     {"command": "tlds", "description": "查看后缀合集"},
     {"command": "log", "description": "最近事件"},
     {"command": "help", "description": "完整使用说明"},
@@ -205,6 +215,7 @@ class Controller(Protocol):
     async def cmd_pause(self, paused: bool) -> str: ...
     async def cmd_log(self, limit: int) -> str: ...
     async def cmd_tlds(self, name: str | None) -> str: ...
+    async def cmd_auto(self, domain: str, value: str | None) -> str: ...
 
 
 class TelegramClient:
@@ -507,6 +518,12 @@ class TelegramBot:
             return await self.controller.cmd_pause(True)
         if command == "resume":
             return await self.controller.cmd_pause(False)
+        if command in ("auto", "自动"):
+            if not args:
+                return "用法：/auto &lt;域名&gt; [开|关|默认]"
+            return await self.controller.cmd_auto(
+                args[0], args[1] if len(args) > 1 else None
+            )
         if command in ("tlds", "tld", "合集"):
             return await self.controller.cmd_tlds(args[0] if args else None)
         if command == "log":

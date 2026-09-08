@@ -509,7 +509,22 @@ class Engine:
             await self.notifier.available(domain, reason)
 
         if not self.config.purchase.enabled:
-            logger.warning("%s 可注册，但 purchase.enabled=false，仅通知不下单", domain)
+            logger.warning("%s 可注册，但没开启下单功能，仅通知", domain)
+            return False
+
+        # 逐个域名的开关。全局开关只决定「能不能买」，
+        # 这里决定「这一个要不要买」——盯一批后缀但只想抢其中一个时用得上。
+        if not self.auto_buy_allowed(watched):
+            logger.warning("%s 可注册，但该域名未开启自动下单", domain)
+            self.storage.add_event(
+                "auto_buy_skipped", domain=domain,
+                message="该域名未开启自动下单，仅通知", level="warning",
+            )
+            await self.notifier.send(
+                f"🔔 <b>{escape_html(display_domain(domain))}</b> 可以注册了\n"
+                f"这个域名没开自动下单，要买请发 "
+                f"<code>/buy {escape_html(display_domain(domain))}</code>"
+            )
             return False
         if self.paused:
             logger.warning("%s 可注册，但抢注已被 /pause 暂停", domain)
@@ -611,6 +626,12 @@ class Engine:
                 return None
 
         return await self._attempt_loop(domain, years, price_limit, reason)
+
+    def auto_buy_allowed(self, watched: WatchedDomain) -> bool:
+        """这个域名允许自动下单吗？域名自己的设置优先于全局默认。"""
+        if watched.auto_buy is None:
+            return self.config.purchase.auto_buy_default
+        return watched.auto_buy
 
     def _reserve_purchase_slot(self) -> bool:
         """占一个当日成交名额；占不到返回 False。
@@ -876,8 +897,12 @@ class Engine:
             elif item.expires_at:
                 tail = f"　{to_utc(item.expires_at):%Y-%m-%d}到期"
             flag = "" if item.enabled else "　已停"
+            # 真会花钱的时候，把「哪些会自动买」标出来
+            cart = ""
+            if self.config.purchase.enabled and item.enabled:
+                cart = "🛒" if self.auto_buy_allowed(item) else "🔕"
             lines.append(
-                f"{item.state.emoji} <code>{escape_html(display_domain(item.domain))}</code>"
+                f"{item.state.emoji}{cart} <code>{escape_html(display_domain(item.domain))}</code>"
                 f"{tail}{flag}"
             )
         if len(domains) > 30:
@@ -1004,6 +1029,10 @@ class Engine:
             lines.append(f"同组　　　另有 {len(siblings)} 个{note}")
         if watched.note:
             lines.append(f"备注　　　{escape_html(watched.note)}")
+        if self.config.purchase.enabled:
+            state = {True: "开", False: "关", None: "跟随全局"}[watched.auto_buy]
+            actual = "会自动买" if self.auto_buy_allowed(watched) else "只通知"
+            lines.append(f"自动下单　{state}（{actual}）")
         lines.append(f"来源　　　{source_label(watched.source)}")
         if watched.last_error:
             lines.append(f"\n⚠️ {escape_html(watched.last_error)}")
@@ -1105,6 +1134,47 @@ class Engine:
             self.storage.add_event("removed", domain=name, message="经 Telegram 移出监控")
             return f"🗑 已移出监控：<code>{escape_html(name)}</code>"
         return f"<code>{escape_html(name)}</code> 不在监控列表中"
+
+    async def cmd_auto(self, domain: str, value: str | None) -> str:
+        """查看或设置某个域名的自动下单开关。"""
+        name = normalize_domain(domain)
+        watched = self.storage.get_domain(name)
+        if watched is None:
+            return f"<code>{escape_html(display_domain(name))}</code> 不在监控列表中"
+
+        shown = escape_html(display_domain(name))
+        if value is None:
+            state = "跟随全局" if watched.auto_buy is None else (
+                "开" if watched.auto_buy else "关"
+            )
+            actual = "会自动买" if self.auto_buy_allowed(watched) else "只通知，不买"
+            return (
+                f"<code>{shown}</code> 自动下单：<b>{state}</b>\n"
+                f"当前实际效果：{actual}\n\n"
+                f"<code>/auto {shown} 开</code>　只抢这个\n"
+                f"<code>/auto {shown} 关</code>　只通知不买\n"
+                f"<code>/auto {shown} 默认</code>　跟随全局"
+            )
+
+        token = value.strip().lower()
+        if token in ("on", "开", "是", "true", "1", "买"):
+            target: bool | None = True
+        elif token in ("off", "关", "否", "false", "0", "不买"):
+            target = False
+        elif token in ("默认", "default", "auto", "跟随"):
+            target = None
+        else:
+            return f"看不懂「{escape_html(value)}」，请用 开 / 关 / 默认"
+
+        self.storage.set_auto_buy(name, target)
+        self.storage.add_event(
+            "auto_buy_changed", domain=name,
+            message=f"自动下单设为 {'开' if target else ('关' if target is False else '跟随全局')}",
+        )
+        watched = self.storage.get_domain(name)
+        actual = "会自动买" if watched and self.auto_buy_allowed(watched) else "只通知，不买"
+        label = {True: "开", False: "关", None: "跟随全局"}[target]
+        return f"✅ <code>{shown}</code> 自动下单已设为 <b>{label}</b>（{actual}）"
 
     async def cmd_buy(self, domain: str) -> str:
         name = normalize_domain(domain)

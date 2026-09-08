@@ -1165,3 +1165,134 @@ async def test_status_shows_daily_quota(rdap_server, storage):
     )
     text = await engine.cmd_status()
     assert "/5 个" in text
+
+
+# --------------------------------------------------- 逐个域名的自动下单开关
+
+async def test_whitelist_mode_only_buys_flagged_domains(rdap_server, storage):
+    """盯一批后缀但只想抢其中一个：auto_buy_default=false + 单独开一个。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "max_per_day": 10, "auto_buy_default": False,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+        registrar={"provider": "dryrun", "options": {"price": 9.0}},
+    )
+    for tld in ("com", "net", "io"):
+        storage.upsert_domain(f"vps.{tld}", auto_buy=(tld == "com"))
+        rdap_server.set(f"vps.{tld}", None)
+
+    await engine.run_once()
+
+    bought = [item["domain"] for item in storage.recent_purchases(10) if item["success"]]
+    assert bought == ["vps.com"]
+    skipped = {event.domain for event in storage.recent_events(30)
+               if event.kind == "auto_buy_skipped"}
+    assert skipped == {"vps.net", "vps.io"}
+
+
+async def test_per_domain_opt_out_under_permissive_default(rdap_server, storage):
+    """默认全买的模式下，也能单独把某个域名标成「只通知」。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "max_per_day": 10, "auto_buy_default": True,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+        registrar={"provider": "dryrun", "options": {"price": 9.0}},
+    )
+    storage.upsert_domain("yes.com")                    # 跟随全局 → 买
+    storage.upsert_domain("no.com", auto_buy=False)     # 单独关掉 → 不买
+    rdap_server.set("yes.com", None)
+    rdap_server.set("no.com", None)
+
+    await engine.run_once()
+
+    bought = [item["domain"] for item in storage.recent_purchases(10) if item["success"]]
+    assert bought == ["yes.com"]
+    assert storage.get_domain("no.com").state is DomainState.AVAILABLE
+
+
+async def test_skipped_domain_still_gets_notified(rdap_server, storage):
+    """不买不等于不告诉你——否则等于白监控。"""
+    telegram = FakeTelegram()
+    engine = build_engine(
+        rdap_server, storage, bot=telegram,
+        telegram={"enabled": True, "bot_token": "t", "chat_id": "1"},
+        purchase={"enabled": True, "dry_run": False, "auto_buy_default": False},
+    )
+    storage.upsert_domain("watch.com")
+    rdap_server.set("watch.com", None)
+
+    await engine.run_once()
+
+    joined = "\n".join(telegram.messages)
+    assert "可以注册了" in joined
+    assert "/buy watch.com" in joined       # 告诉用户怎么手动买
+
+
+async def test_manual_buy_ignores_the_auto_flag(rdap_server, storage):
+    """/buy 是用户明确指令，不该被「只通知」的标记挡住。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "auto_buy_default": False,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+    )
+    storage.upsert_domain("manual.com", auto_buy=False)
+    rdap_server.set("manual.com", None)
+
+    await engine._manual_buy(storage.get_domain("manual.com"))
+
+    assert storage.get_domain("manual.com").state is DomainState.ACQUIRED
+
+
+@pytest.mark.parametrize(
+    "word,expected",
+    [("开", True), ("on", True), ("买", True),
+     ("关", False), ("off", False), ("不买", False),
+     ("默认", None), ("default", None)],
+)
+async def test_cmd_auto_accepts_chinese_and_english(rdap_server, storage, word, expected):
+    engine = build_engine(rdap_server, storage, purchase={"enabled": True})
+    storage.upsert_domain("a.com")
+
+    await engine.cmd_auto("a.com", word)
+
+    assert storage.get_domain("a.com").auto_buy is expected
+
+
+async def test_cmd_auto_rejects_gibberish(rdap_server, storage):
+    engine = build_engine(rdap_server, storage, purchase={"enabled": True})
+    storage.upsert_domain("a.com")
+
+    reply = await engine.cmd_auto("a.com", "随便")
+
+    assert "看不懂" in reply
+    assert storage.get_domain("a.com").auto_buy is None      # 没被改坏
+
+
+async def test_cmd_auto_on_unknown_domain(rdap_server, storage):
+    engine = build_engine(rdap_server, storage)
+    assert "不在监控列表" in await engine.cmd_auto("nope.com", None)
+
+
+async def test_list_marks_which_domains_will_be_bought(rdap_server, storage):
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "auto_buy_default": False},
+    )
+    storage.upsert_domain("buy.com", auto_buy=True)
+    storage.upsert_domain("watch.com")
+
+    listing = await engine.cmd_list()
+
+    assert "🛒" in listing and "🔕" in listing
+
+
+async def test_list_has_no_cart_markers_when_purchasing_is_off(rdap_server, storage):
+    """没开下单功能时不该出现购物车图标，那只会让人误会。"""
+    engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+    storage.upsert_domain("a.com")
+
+    listing = await engine.cmd_list()
+
+    assert "🛒" not in listing and "🔕" not in listing

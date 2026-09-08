@@ -105,6 +105,9 @@ class PurchaseConfig:
     # 每天最多买几个。金额预算拦不住「一次性买下一堆便宜域名」——
     # 盯 58 个后缀时可能有十几个当前就是空的，开关一开会全部买走。
     max_per_day: int = 3
+    # 没有单独标 auto_buy 的域名，默认自动下单吗？
+    # 设成 false 就变成「白名单模式」：只有显式写了 auto_buy: true 的才会被买。
+    auto_buy_default: bool = True
     currency: str = "USD"
     max_attempts: int = 120           # 单个域名单次冲刺的最大下单次数
     attempt_interval: float = 0.5     # 两次下单之间的间隔
@@ -149,6 +152,8 @@ class DomainEntry:
     # 可以按 stop_after_first 把其余的撤下来
     group: str | None = None
     stop_after_first: bool = False
+    # 是否自动下单。None = 跟随 purchase.auto_buy_default
+    auto_buy: bool | None = None
 
 
 @dataclass(slots=True)
@@ -162,6 +167,8 @@ class PrefixEntry:
     note: str | None = None
     # 只要抢到其中一个就够了，抢到后把同组其余的撤下来
     stop_after_first: bool = True
+    # 整组是否自动下单。None = 跟随 purchase.auto_buy_default
+    auto_buy: bool | None = None
 
 
 @dataclass(slots=True)
@@ -292,6 +299,15 @@ def _build_lifecycle(data: Any) -> LifecycleConfig:
     return LifecycleConfig(default=default, tlds=tlds)
 
 
+def _optional_bool(value: Any, where: str) -> bool | None:
+    """三态开关：没写就是 None（跟随全局），写了就必须是布尔。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{where}.auto_buy 只能是 true / false，实际是 {value!r}")
+
+
 def _build_registrars(data: Any) -> list[RegistrarConfig]:
     """解析 ``registrars:`` 列表（多通道比价 / 并发抢注用）。"""
     if data is None:
@@ -340,6 +356,7 @@ def _build_domains(
                     note=item.get("note"),
                     group=group,
                     stop_after_first=bool(item.get("stop_after_first", False)),
+                    auto_buy=_optional_bool(item.get("auto_buy"), f"domains[{index}]"),
                 )
             )
     return entries
@@ -414,6 +431,7 @@ def _build_prefixes(
                         note=entry.note,
                         group=group,
                         stop_after_first=entry.stop_after_first,
+                        auto_buy=entry.auto_buy,
                     )
                 )
         prefixes.append(entry)

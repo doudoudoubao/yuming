@@ -176,6 +176,7 @@ class WatchedDomain:
     source: str = "config"
     group: str | None = None
     stop_after_first: bool = False
+    auto_buy: bool | None = None      # None = 跟随全局默认
     enabled: bool = True
     added_at: datetime = field(default_factory=utcnow)
     acquired_at: datetime | None = None

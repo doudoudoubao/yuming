@@ -179,3 +179,37 @@ def test_legacy_database_is_migrated(tmp_path):
     # 幂等：再开一次不该出错
     with Storage(path) as store:
         assert store.get_domain("legacy.com") is not None
+
+
+def test_auto_buy_roundtrip(storage: Storage):
+    storage.upsert_domain("a.com", auto_buy=True)
+    storage.upsert_domain("b.com", auto_buy=False)
+    storage.upsert_domain("c.com")
+
+    assert storage.get_domain("a.com").auto_buy is True
+    assert storage.get_domain("b.com").auto_buy is False
+    assert storage.get_domain("c.com").auto_buy is None      # 跟随全局
+
+
+def test_set_auto_buy_toggles_and_resets(storage: Storage):
+    storage.upsert_domain("a.com")
+
+    assert storage.set_auto_buy("a.com", True) is True
+    assert storage.get_domain("a.com").auto_buy is True
+
+    storage.set_auto_buy("a.com", False)
+    assert storage.get_domain("a.com").auto_buy is False
+
+    storage.set_auto_buy("a.com", None)                      # 恢复跟随全局
+    assert storage.get_domain("a.com").auto_buy is None
+
+    assert storage.set_auto_buy("missing.com", True) is False
+
+
+def test_upsert_does_not_clobber_auto_buy(storage: Storage):
+    """配置同步时没提供 auto_buy，不该把已有的设置抹掉。"""
+    storage.upsert_domain("a.com", auto_buy=False)
+    storage.upsert_domain("a.com", max_price=20)
+
+    assert storage.get_domain("a.com").auto_buy is False
+    assert storage.get_domain("a.com").max_price == 20

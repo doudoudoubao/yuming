@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS domains (
     source               TEXT NOT NULL DEFAULT 'config',
     group_name           TEXT,
     stop_after_first     INTEGER NOT NULL DEFAULT 0,
+    auto_buy             INTEGER,
     enabled              INTEGER NOT NULL DEFAULT 1,
     added_at             TEXT NOT NULL,
     acquired_at          TEXT,
@@ -122,6 +123,7 @@ class Storage:
         additions = {
             "group_name": "TEXT",
             "stop_after_first": "INTEGER NOT NULL DEFAULT 0",
+            "auto_buy": "INTEGER",
             "redemption_since": "TEXT",
             "last_error": "TEXT",
         }
@@ -152,6 +154,7 @@ class Storage:
         source: str = "config",
         group: str | None = None,
         stop_after_first: bool = False,
+        auto_buy: bool | None = None,
     ) -> bool:
         """加入监控列表，返回 True 表示是新增（而不是更新）。"""
         now = iso(utcnow())
@@ -167,19 +170,22 @@ class Storage:
                            note             = COALESCE(?, note),
                            group_name       = COALESCE(?, group_name),
                            stop_after_first = ?,
+                           auto_buy         = COALESCE(?, auto_buy),
                            enabled          = 1
                      WHERE domain = ?""",
-                    (max_price, years, note, group, 1 if stop_after_first else 0, domain),
+                    (max_price, years, note, group, 1 if stop_after_first else 0,
+                     None if auto_buy is None else int(auto_buy), domain),
                 )
                 self._conn.commit()
                 return False
             self._conn.execute(
                 """INSERT INTO domains
                    (domain, max_price, years, note, source, group_name, stop_after_first,
-                    added_at, next_check_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    auto_buy, added_at, next_check_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (domain, max_price, years, note, source, group,
-                 1 if stop_after_first else 0, now, now),
+                 1 if stop_after_first else 0,
+                 None if auto_buy is None else int(auto_buy), now, now),
             )
             self._conn.commit()
             return True
@@ -187,6 +193,16 @@ class Storage:
     def remove_domain(self, domain: str) -> bool:
         with self._lock:
             cursor = self._conn.execute("DELETE FROM domains WHERE domain = ?", (domain,))
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def set_auto_buy(self, domain: str, auto_buy: bool | None) -> bool:
+        """单独设置某个域名是否自动下单。None 表示恢复成跟随全局默认。"""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE domains SET auto_buy = ? WHERE domain = ?",
+                (None if auto_buy is None else int(auto_buy), domain),
+            )
             self._conn.commit()
             return cursor.rowcount > 0
 
@@ -301,6 +317,7 @@ class Storage:
                 source="config",
                 group=getattr(entry, "group", None),
                 stop_after_first=getattr(entry, "stop_after_first", False),
+                auto_buy=getattr(entry, "auto_buy", None),
             ):
                 added.append(name)
 
@@ -496,6 +513,10 @@ def _row_to_domain(row: sqlite3.Row) -> WatchedDomain:
         source=row["source"] or "config",
         group=row["group_name"] if "group_name" in keys else None,
         stop_after_first=bool(row["stop_after_first"]) if "stop_after_first" in keys else False,
+        auto_buy=(
+            None if ("auto_buy" not in keys or row["auto_buy"] is None)
+            else bool(row["auto_buy"])
+        ),
         enabled=bool(row["enabled"]),
         added_at=parse_datetime(row["added_at"]) or datetime.now(timezone.utc),
         acquired_at=parse_datetime(row["acquired_at"]),
