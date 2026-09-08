@@ -454,8 +454,8 @@ async def test_cmd_status_and_log(rdap_server, storage):
     storage.add_event("test", domain="a.com", message="hello")
 
     status = await engine.cmd_status()
-    assert "监控域名" in status
-    assert "注册商" in status
+    assert "在盯" in status
+    assert "通道" in status
 
     log = await engine.cmd_log(5)
     assert "hello" in log

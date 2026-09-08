@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from .utils import iso, to_utc, utcnow
+from .utils import display_domain, iso, to_utc, utcnow
 
 
 class DomainState(str, Enum):
@@ -72,6 +72,40 @@ class Phase(str, Enum):
     NEAR = "near"        # 临近预测释放时间
     SPRINT = "sprint"    # 冲刺，高频探测 + 直接下单
 
+    @property
+    def label(self) -> str:
+        return _PHASE_LABELS[self]
+
+    @property
+    def emoji(self) -> str:
+        return _PHASE_EMOJI[self]
+
+
+_PHASE_LABELS = {
+    Phase.IDLE: "常规",
+    Phase.WATCH: "盯紧",
+    Phase.NEAR: "临近",
+    Phase.SPRINT: "冲刺",
+}
+
+_PHASE_EMOJI = {
+    Phase.IDLE: "🌙",
+    Phase.WATCH: "👀",
+    Phase.NEAR: "⏱",
+    Phase.SPRINT: "🔥",
+}
+
+# 域名是怎么进到监控列表里的
+SOURCE_LABELS = {
+    "config": "配置文件",
+    "telegram": "Telegram",
+    "cli": "命令行",
+}
+
+
+def source_label(source: str | None) -> str:
+    return SOURCE_LABELS.get(source or "", source or "未知")
+
 
 @dataclass(slots=True)
 class DomainStatus:
@@ -95,7 +129,7 @@ class DomainStatus:
         return self.state == DomainState.AVAILABLE
 
     def summary(self) -> str:
-        parts = [f"{self.state.emoji} {self.domain} {self.state.label}"]
+        parts = [f"{self.state.emoji} {display_domain(self.domain)} {self.state.label}"]
         if self.registrar:
             parts.append(f"注册商={self.registrar}")
         if self.expires_at:

@@ -19,6 +19,8 @@ from .utils import (
     human_until,
     is_valid_domain,
     PatternError,
+    display_domain,
+    display_width,
     expand_patterns,
     load_dotenv,
     normalize_domain,
@@ -125,7 +127,7 @@ async def cmd_check(config: AppConfig, domains: list[str]) -> int:
         for raw in domains:
             name = normalize_domain(raw)
             if not is_valid_domain(name):
-                print(f"✗ {raw}: 不是合法域名")
+                print(f"✗ {raw}：不是合法域名")
                 exit_code = 2
                 continue
             status = await app.rdap.lookup(name)
@@ -154,7 +156,7 @@ async def cmd_price(config: AppConfig, domains: list[str]) -> int:
         for raw in domains:
             name = normalize_domain(raw)
             if not is_valid_domain(name):
-                print(f"✗ {raw}: 不是合法域名")
+                print(f"✗ {raw}：不是合法域名")
                 exit_code = 2
                 continue
 
@@ -192,54 +194,69 @@ async def cmd_price(config: AppConfig, domains: list[str]) -> int:
 async def cmd_test(config: AppConfig) -> int:
     """连通性自检：配置、RDAP、注册商、Telegram、DNS。"""
     ok = True
-    print(f"配置文件      : {config.path or '（未找到，使用默认值）'}")
-    print(f"数据库        : {config.database_path}")
-    print(f"监控域名      : {len(config.domains)} 个（配置文件中）")
+
+    def row(label: str, value: str, mark: str = " ") -> None:
+        print(f"  {mark} {pad(label, 16)}{value}")
+
+    print("\n【配置】")
+    row("配置文件", config.path or "未找到，正在使用默认值")
+    row("数据库", config.database_path)
+    row("监控域名", f"{len(config.domains)} 个（写在配置文件里的）")
 
     async with Application(config) as app:
+        print("\n【域名查询】")
         server = await app.rdap.server_for("example.com")
-        print(f"RDAP (.com)   : {server or '未找到服务器'}")
+        row("RDAP 服务器", server or "没找到", "✓" if server else "✗")
         ok = ok and server is not None
 
         status = await app.rdap.lookup("example.com")
-        mark = "✓" if status.state != DomainState.ERROR else "✗"
-        print(f"RDAP 查询     : {mark} {status.summary()}")
-        ok = ok and status.state != DomainState.ERROR
+        healthy = status.state != DomainState.ERROR
+        row("试查域名",
+            status.summary() if healthy else f"查询失败：{status.error}",
+            "✓" if healthy else "✗")
+        ok = ok and healthy
 
-        print(f"DNS 探测      : {'✓ 可用' if app.probe.usable else '✗ 不可用（未安装 dnspython 或已禁用）'}")
         if app.probe.usable:
             probe = await app.probe.probe("example.com")
-            print(f"  example.com : {probe.value}")
+            row("DNS 探测", f"可用（example.com → {probe.value}）", "✓")
+        else:
+            row("DNS 探测", "不可用，冲刺会慢一些（pip install dnspython）", "!")
 
-        print(f"注册商通道    : {len(app.pool)} 个（{'、'.join(app.pool.labels)}）")
+        print(f"\n【注册商】{len(app.pool)} 个通道")
         for registrar, healthy, message in await app.pool.ping_all():
-            print(f"  {registrar.label:<12}: {'✓' if healthy else '✗'} {message}")
+            # 适配器返回的消息常带 "名字: " 前缀，标签已经显示过了，去掉免得重复
+            prefix = f"{registrar.name}: "
+            if message.startswith(prefix):
+                message = message[len(prefix):]
+            row(registrar.label, message, "✓" if healthy else "✗")
             ok = ok and healthy
 
+        print("\n【通知】")
         if config.telegram.enabled:
             me = await app.telegram.get_me()
             if me:
-                print(f"Telegram      : ✓ 已连接 @{me.get('username')}")
-                await app.notifier.send("✅ 域名监控自检：Telegram 通道正常")
-                print("                已发送一条测试消息，请查收")
+                row("Telegram", f"已连接 @{me.get('username')}，已发一条测试消息", "✓")
+                await app.notifier.send("✅ 自检通过，Telegram 通道正常")
             else:
-                print("Telegram      : ✗ 连接失败，检查 bot_token / 网络")
+                row("Telegram", "连接失败，检查 bot_token 和网络", "✗")
                 ok = False
         else:
-            print("Telegram      : － 未启用")
+            row("Telegram", "未启用", "-")
 
+        print("\n【抢注】")
         purchase = config.purchase
         if not purchase.enabled:
-            print("抢注          : － 未启用（purchase.enabled=false）")
+            row("模式", "仅监控，不会下单", "-")
         elif purchase.dry_run:
-            print("抢注          : 演练模式（dry_run=true，不会真的下单）")
+            row("模式", "演练，不会真的花钱", "-")
         else:
-            print(
-                f"抢注          : ⚠️ 真实下单已开启！单价上限 {purchase.max_price:.2f}，"
-                f"日预算 {purchase.daily_budget:.2f}"
-            )
+            row("模式", "⚠️  真实下单已开启", "!")
+            row("单价上限", f"{purchase.max_price:.2f} {purchase.currency}")
+            row("每日预算", f"{purchase.daily_budget:.2f} {purchase.currency}")
+
     print()
-    print("自检结果      :", "✓ 全部通过" if ok else "✗ 存在问题，见上文")
+    print("  " + ("✅ 自检全部通过" if ok else "❌ 有项目没通过，见上文"))
+    print()
     return 0 if ok else 1
 
 
@@ -260,20 +277,28 @@ async def cmd_list(config: AppConfig) -> int:
     async with Application(config) as app:
         items = app.storage.list_domains()
         if not items:
-            print("监控列表为空")
+            print("监控列表还是空的。用 add 加几个：")
+            print("  domain-monitor add example.com")
+            print("  domain-monitor add 'vps.{@two}'")
             return 0
-        width = max(max(len(item.domain) for item in items), 8) + 2
-        print(f"{pad('域名', width)}{pad('状态', 16)}{pad('预计释放', 22)}下次检查")
-        print("-" * (width + 50))
+
+        shown = {item.domain: display_domain(item.domain) for item in items}
+        width = max(max(display_width(name) for name in shown.values()), 8) + 2
+        active = sum(1 for item in items if item.enabled)
+        print(f"共 {len(items)} 个域名，在盯 {active} 个\n")
+        print(f"  {pad('域名', width)}{pad('状态', 14)}{pad('档位', 8)}预计释放")
+        print("  " + "─" * (width + 44))
         for item in items:
-            drop = (
-                f"{to_utc(item.drop_at):%Y-%m-%d %H:%M}Z" if item.drop_at else "-"
-            )
-            nxt = human_until(item.next_check_at) if item.next_check_at else "-"
-            flag = "" if item.enabled else " (停用)"
+            if item.drop_at:
+                drop = f"{to_utc(item.drop_at):%m-%d %H:%M}  {human_until(item.drop_at)}"
+            elif item.expires_at:
+                drop = f"{to_utc(item.expires_at):%Y-%m-%d} 到期"
+            else:
+                drop = "—"
+            phase = item.phase.label if item.enabled else "已停"
             print(
-                f"{pad(item.domain, width)}{pad(item.state.label, 16)}"
-                f"{pad(drop, 22)}{nxt}{flag}"
+                f"  {pad(shown[item.domain], width)}{pad(item.state.label, 14)}"
+                f"{pad(phase, 8)}{drop}"
             )
     return 0
 
@@ -295,21 +320,25 @@ def cmd_tlds(config: AppConfig, name: str | None) -> int:
             print(f"⚠️  {note}")
         return 0
 
-    print("可用的后缀合集：\n")
+    print("\n可用的后缀合集\n")
     for key in group_names():
         items = groups.get(key, [])
-        preview = " ".join(items[:8])
-        if len(items) > 8:
-            preview += f" … (共 {len(items)} 个)"
-        mark = " ⚠️" if key in RESTRICTED_NOTES else ""
-        print(f"  {pad('@' + key, 12)}{preview}{mark}")
-    print("\n用法：")
-    print("  domain_monitor add 'vps.{@all}'        一次盯全部无限制后缀")
-    print("  domain_monitor add 'vps.{@two}'        只要两位的")
-    print("  domain_monitor add 'vps.{@two,com}'    合集和具体后缀混写")
-    print("  domain_monitor tlds all                看某个合集的完整内容")
+        preview = " ".join(items[:9])
+        if len(items) > 9:
+            preview += " …"
+        mark = "⚠️" if key in RESTRICTED_NOTES else "  "
+        print(f"  {mark} {pad('@' + key, 10)}{pad(f'{len(items)} 个', 7)}{preview}")
+        if key in RESTRICTED_NOTES:
+            print(f"     {pad('', 10)}       {RESTRICTED_NOTES[key]}")
+    print("""
+用法
+  domain-monitor add 'vps.{@all}'      一次盯全部无门槛后缀
+  domain-monitor add 'vps.{@two}'      只要两位的
+  domain-monitor add 'vps.{@two,com}'  合集与具体后缀混写
+  domain-monitor tlds all              看某组的完整内容
+""")
     if any(key in RESTRICTED_NOTES for key in groups):
-        print("\n⚠️ 标记的组有注册限制，下单前先用 price 命令确认注册商是否支持。")
+        print("⚠️ 的组有注册门槛，下单前先用 price 确认注册商卖不卖。\n")
     return 0
 
 
@@ -353,21 +382,40 @@ def cmd_init(path: str) -> int:
 
 # ------------------------------------------------------------------------ 入口
 
+class ChineseHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """argparse 自带的 usage: / options: 都是英文，这里换成中文。"""
+
+    def add_usage(self, usage, actions, groups, prefix=None):
+        super().add_usage(usage, actions, groups, prefix or "用法：")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="domain-monitor",
-        description="域名监控与自动抢注系统（RDAP + DNS 探测 + Telegram）",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"可用注册商: {', '.join(available_providers())}",
+        description="域名监控与自动抢注（RDAP + DNS 探测 + Telegram）",
+        formatter_class=ChineseHelpFormatter,
+        epilog=(
+            f"可用注册商：{'、'.join(available_providers())}\n"
+            f"后缀合集：{'、'.join('@' + name for name in group_names())}"
+            f"（domain-monitor tlds 可查看内容）"
+        ),
+        add_help=False,      # 自己加，好换成中文说明
     )
-    parser.add_argument("-c", "--config", help="配置文件路径（默认找 config.yaml）")
-    parser.add_argument("--database", help="覆盖配置里的数据库路径")
     parser.add_argument(
-        "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="日志级别"
+        "-h", "--help", action="help", help="显示这份帮助并退出"
     )
-    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-c", "--config", metavar="路径",
+                        help="配置文件路径（默认自动找 config.yaml）")
+    parser.add_argument("--database", metavar="路径", help="覆盖配置里的数据库位置")
+    parser.add_argument(
+        "--log-level", metavar="级别",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="日志级别"
+    )
+    parser.add_argument("-V", "--version", action="version",
+                        version=f"%(prog)s {__version__}", help="显示版本并退出")
+    parser._optionals.title = "选项"
 
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", title="子命令", metavar="")
     sub.add_parser("run", help="启动常驻监控（默认）")
     sub.add_parser("once", help="只跑一轮巡检然后退出（适合配 cron）")
     sub.add_parser("test", help="连通性自检：RDAP / 注册商 / Telegram / DNS")

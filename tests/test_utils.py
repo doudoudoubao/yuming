@@ -193,3 +193,35 @@ def test_internationalized_tlds_are_valid(raw):
 @pytest.mark.parametrize("raw", ["no-tld", "-bad.com", "bad-.com", "x.c0m", "a.", ""])
 def test_invalid_domains_still_rejected_after_idn_support(raw):
     assert not is_valid_domain(normalize_domain(raw))
+
+
+@pytest.mark.parametrize(
+    "stored,shown",
+    [
+        ("xn--0zwm56d.com", "测试.com"),
+        ("xn--eqrt2gmt2b.cn", "短域名.cn"),
+        ("xn--fsqu00a.xn--fiqs8s", "例子.中国"),
+        ("example.com", "example.com"),       # 非 IDN 原样返回
+        ("", ""),
+    ],
+)
+def test_display_domain_restores_unicode(stored, shown):
+    """界面上该显示中文，punycode 只是内部存储形式。"""
+    from domain_monitor.utils import display_domain
+
+    assert display_domain(stored) == shown
+
+
+def test_display_domain_never_raises_on_garbage():
+    """展示层绝不能因为解码失败而崩掉。"""
+    from domain_monitor.utils import display_domain
+
+    for bad in ("xn--bad!!", "xn--", "xn--@@@.com"):
+        assert display_domain(bad) == bad
+
+
+def test_display_domain_roundtrips_with_normalize():
+    from domain_monitor.utils import display_domain, normalize_domain
+
+    for original in ("测试.com", "例子.中国", "短域名.cn"):
+        assert display_domain(normalize_domain(original)) == original

@@ -81,7 +81,7 @@ def test_add_list_remove_roundtrip(tmp_path, offline, capsys):
     assert "已移出监控" in capsys.readouterr().out
 
     assert cli.main(["-c", config, "list"]) == 0
-    assert "监控列表为空" in capsys.readouterr().out
+    assert "监控列表还是空的" in capsys.readouterr().out
 
 
 def test_check_command(tmp_path, offline, capsys):
@@ -131,7 +131,7 @@ def test_test_command_reports(tmp_path, offline, capsys):
     out = capsys.readouterr().out
     assert "RDAP" in out
     assert "注册商" in out
-    assert "自检结果" in out
+    assert "自检" in out
 
 
 def test_log_command(tmp_path, offline, capsys):
@@ -169,3 +169,36 @@ async def test_dns_probe_handles_missing_nameservers(monkeypatch):
 
     monkeypatch.setattr(probe, "_tld_nameservers", no_servers)
     assert await probe.probe("example.com") is ProbeResult.UNKNOWN
+
+
+def test_argparse_help_is_chinese(capsys):
+    """argparse 自带的 usage: / options: 是英文，必须换掉。"""
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+
+    assert "用法：" in out and "选项" in out and "子命令" in out
+    for leak in ("usage:", "positional arguments:", "options:",
+                 "show this help message"):
+        assert leak not in out, f"帮助里还留着英文：{leak}"
+
+
+def test_list_shows_chinese_phase_labels(tmp_path, offline, capsys):
+    """档位不能显示成 idle / sprint 这种内部标识。"""
+    from domain_monitor.models import Phase
+    from domain_monitor.storage import Storage
+
+    config = write_config(tmp_path)
+    cli.main(["-c", config, "add", "a.com"])
+    capsys.readouterr()
+
+    with Storage(tmp_path / "test.db") as store:
+        store.update_domain("a.com", phase=Phase.SPRINT)
+
+    cli.main(["-c", config, "list"])
+    out = capsys.readouterr().out
+
+    assert "冲刺" in out
+    assert "sprint" not in out

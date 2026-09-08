@@ -209,7 +209,7 @@ async def test_help_and_unknown_commands():
     # /help 现在返回多条
     sections = await bot._handle_command("/help")
     assert isinstance(sections, list)
-    assert "域名监控机器人" in sections[0]
+    assert "域名监控" in sections[0]
     assert "用法" in await bot._handle_command("/check")
     assert "未知命令" in await bot._handle_command("/nonsense")
 
@@ -583,8 +583,7 @@ async def test_help_sends_all_sections():
     joined = "\n".join(item["text"] for item in recorder.sent)
     assert "/list" in joined                    # 命令
     assert "@all" in joined                     # 批量写法
-    assert "永远不要发凭据" in joined            # 安全
-    assert "待删除" in joined                    # 状态
+    assert "永远不要把凭据发给我" in joined       # 安全
 
 
 async def test_every_help_section_fits_one_message():
@@ -600,11 +599,11 @@ async def test_every_help_section_fits_one_message():
     [
         ("模式", "批量写法"),
         ("pattern", "批量写法"),
-        ("抢注", "抢注与安全"),
-        ("buy", "抢注与安全"),
-        ("安全", "抢注与安全"),
-        ("状态", "状态与推送"),
-        ("3", "抢注与安全"),
+        ("抢注", "花钱规则与安全"),
+        ("buy", "花钱规则与安全"),
+        ("安全", "花钱规则与安全"),
+        ("状态", "状态含义与推送"),
+        ("3", "花钱规则与安全"),
     ],
 )
 async def test_help_topic_sends_one_section(arg, expect):
@@ -706,5 +705,33 @@ def test_help_purchase_defaults_are_described_correctly():
     assert config.purchase.dry_run is True
 
     text = HELP_SECTIONS["抢注"]
-    assert "purchase.enabled 默认 false" in text
-    assert "dry_run" in text
+    assert "只监控只推送" in text          # 默认不下单
+    assert "演练模式" in text              # dry_run 的中文说法
+
+
+async def test_messages_show_chinese_domains_not_punycode():
+    """中文域名在界面上要显示成中文，而不是 xn-- 开头的一串。"""
+    from domain_monitor.storage import Storage
+    from tests.conftest import FakeRdapServer
+    from tests.test_engine import build_engine
+
+    storage = Storage(":memory:")
+    engine = build_engine(FakeRdapServer(), storage)
+    storage.upsert_domain("xn--0zwm56d.com")
+
+    listing = await engine.cmd_list()
+    info = await engine.cmd_info("测试.com")
+
+    assert "测试.com" in listing and "xn--" not in listing
+    assert "测试.com" in info and "xn--" not in info
+    storage.close()
+
+
+def test_no_english_state_or_phase_leaks_in_help():
+    """/help 里不该出现 idle/sprint/registered 这类内部标识。"""
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+
+    joined = "\n".join(HELP_SECTIONS.values())
+    for leak in ("idle", "watch", "near", "sprint",
+                 "registered", "pending_delete", "redemption", "available"):
+        assert leak not in joined, f"/help 里漏出了内部标识 {leak}"

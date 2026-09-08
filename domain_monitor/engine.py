@@ -27,6 +27,7 @@ from .models import (
     RegistrationResult,
     WatchedDomain,
     estimate_drop_time,
+    source_label,
 )
 from .notify.telegram import Notifier, NullBot
 from .rdap import RdapClient
@@ -37,6 +38,7 @@ from .tldgroups import RESTRICTED_NOTES, group_names
 from .utils import (
     PatternError,
     apply_jitter,
+    display_domain,
     escape_html,
     expand_patterns,
     human_delta,
@@ -45,6 +47,7 @@ from .utils import (
     next_window_occurrence,
     normalize_domain,
     tld_of,
+    truncate,
     to_utc,
     utcnow,
 )
@@ -801,20 +804,27 @@ class Engine:
     async def cmd_list(self) -> str:
         domains = self.storage.list_domains()
         if not domains:
-            return "监控列表为空，用 /add &lt;域名&gt; 添加"
+            return "🗒 监控列表还是空的\n直接把域名发给我就能加入"
 
-        lines = [f"<b>监控列表（{len(domains)}）</b>"]
-        for item in domains[:40]:
-            row = f"{item.state.emoji} <code>{escape_html(item.domain)}</code> {item.state.label}"
-            if not item.enabled:
-                row += "（已停用）"
+        active = [item for item in domains if item.enabled]
+        lines = [f"🗒 <b>监控列表</b> · 共 {len(domains)} 个"]
+        if len(active) != len(domains):
+            lines[0] += f"（在盯 {len(active)}）"
+        lines.append("")
+
+        for item in domains[:30]:
+            tail = ""
             if item.drop_at:
-                row += f"\n    预计释放 {to_utc(item.drop_at):%m-%d %H:%M}Z {human_until(item.drop_at)}"
+                tail = f"　{human_until(item.drop_at)}释放"
             elif item.expires_at:
-                row += f"\n    到期 {to_utc(item.expires_at):%Y-%m-%d}"
-            lines.append(row)
-        if len(domains) > 40:
-            lines.append(f"…… 另有 {len(domains) - 40} 个未显示")
+                tail = f"　{to_utc(item.expires_at):%Y-%m-%d}到期"
+            flag = "" if item.enabled else "　已停"
+            lines.append(
+                f"{item.state.emoji} <code>{escape_html(display_domain(item.domain))}</code>"
+                f"{tail}{flag}"
+            )
+        if len(domains) > 30:
+            lines.append(f"\n… 还有 {len(domains) - 30} 个")
         return "\n".join(lines)
 
     async def cmd_status(self) -> str:
@@ -826,24 +836,42 @@ class Engine:
             for key, value in sorted(stats["by_state"].items())
         ) or "无"
 
-        mode = "关闭（仅监控）"
-        if purchase.enabled:
-            mode = "演练（dry-run）" if purchase.dry_run else "真实下单"
+        if not purchase.enabled:
+            mode = "仅监控，不下单"
+        elif purchase.dry_run:
+            mode = "演练模式，不会真的花钱"
+        else:
+            mode = f"<b>真实下单</b>（单价上限 {purchase.max_price:.0f}）"
         if self.paused:
-            mode += " ⏸ 已暂停"
+            mode += "　⏸ 已暂停"
 
-        return "\n".join([
-            "<b>系统状态</b>",
-            f"运行时长：{uptime}",
-            f"监控域名：{stats['total']}（启用 {stats['enabled']}）",
-            f"状态分布：{by_state}",
-            f"注册商通道：<code>{escape_html('、'.join(self.pool.labels))}</code>",
-            f"抢注模式：{mode}",
-            f"下单尝试：{stats['purchase_attempts']} 次，成功 {stats['purchase_wins']} 次",
-            f"今日花费：{stats['spend_today']:.2f} / {purchase.daily_budget:.2f}",
-            f"冲刺中：{len(self._sprints)} 个",
-            f"DNS 探测：{'可用' if self.probe.usable else '不可用（未装 dnspython 或已禁用）'}",
-        ])
+        lines = [
+            "📊 <b>系统状态</b>",
+            "",
+            f"⏳ 已运行 {uptime}",
+            f"🗒 在盯 {stats['enabled']} / {stats['total']} 个域名",
+        ]
+        if by_state != "无":
+            lines.append(f"　　{by_state}")
+        if self._sprints:
+            lines.append(f"🔥 冲刺中 {len(self._sprints)} 个")
+
+        lines += [
+            "",
+            f"🛒 {mode}",
+            f"🏬 通道 {escape_html('、'.join(self.pool.labels))}",
+        ]
+        if stats["purchase_attempts"]:
+            lines.append(
+                f"🎯 下单 {stats['purchase_attempts']} 次 · 成功 {stats['purchase_wins']} 次"
+            )
+        if not purchase.dry_run and purchase.enabled:
+            lines.append(
+                f"💰 今日花费 {stats['spend_today']:.2f} / {purchase.daily_budget:.2f}"
+            )
+        if not self.probe.usable:
+            lines.append("\n⚠️ DNS 探测不可用，冲刺会慢一些（装 dnspython 可解决）")
+        return "\n".join(lines)
 
     async def cmd_check(self, domain: str) -> str:
         name = normalize_domain(domain)
@@ -854,7 +882,8 @@ class Engine:
         if status.state == DomainState.ERROR:
             return f"⚠️ <code>{escape_html(name)}</code> 查询失败：{escape_html(status.error or '')}"
 
-        lines = [f"{status.state.emoji} <code>{escape_html(name)}</code> <b>{status.state.label}</b>"]
+        lines = [f"{status.state.emoji} <code>{escape_html(display_domain(name))}</code> "
+            f"<b>{status.state.label}</b>"]
         if status.registrar:
             lines.append(f"注册商：{escape_html(status.registrar)}")
         if status.expires_at:
@@ -891,31 +920,35 @@ class Engine:
             return f"<code>{escape_html(name)}</code> 不在监控列表中"
 
         lines = [
-            f"{watched.state.emoji} <code>{escape_html(name)}</code> <b>{watched.state.label}</b>",
-            f"档位：{watched.phase.value}",
-            f"启用：{'是' if watched.enabled else '否'}",
-            f"来源：{watched.source}",
-            f"下单尝试：{watched.attempts} 次",
+            f"{watched.state.emoji} <code>{escape_html(display_domain(name))}</code>",
+            f"<b>{watched.state.label}</b>"
+            + (f"　{watched.phase.emoji} {watched.phase.label}档" if watched.enabled else "　已停用"),
+            "",
         ]
         if watched.registrar:
-            lines.append(f"注册商：{escape_html(watched.registrar)}")
+            lines.append(f"现注册商　{escape_html(watched.registrar)}")
         if watched.expires_at:
-            lines.append(f"到期：{to_utc(watched.expires_at):%Y-%m-%d}")
+            lines.append(f"到期　　　{to_utc(watched.expires_at):%Y-%m-%d}")
         if watched.drop_at:
             lines.append(
-                f"预计释放：{to_utc(watched.drop_at):%Y-%m-%d %H:%M} UTC "
+                f"预计释放　{to_utc(watched.drop_at):%m-%d %H:%M} UTC"
                 f"（{human_until(watched.drop_at)}）"
             )
-        if watched.last_checked_at:
-            lines.append(f"上次检查：{to_utc(watched.last_checked_at):%m-%d %H:%M}Z")
-        if watched.next_check_at:
-            lines.append(f"下次检查：{human_until(watched.next_check_at)}")
+        if watched.next_check_at and watched.enabled:
+            lines.append(f"下次检查　{human_until(watched.next_check_at)}")
         if watched.max_price is not None:
-            lines.append(f"价格上限：{watched.max_price:.2f}")
+            lines.append(f"价格上限　{watched.max_price:.2f}")
+        if watched.attempts:
+            lines.append(f"已尝试　　{watched.attempts} 次下单")
+        if watched.group:
+            siblings = self.storage.group_siblings(name)
+            note = "，抢到一个即停" if watched.stop_after_first else ""
+            lines.append(f"同组　　　另有 {len(siblings)} 个{note}")
         if watched.note:
-            lines.append(f"备注：{escape_html(watched.note)}")
+            lines.append(f"备注　　　{escape_html(watched.note)}")
+        lines.append(f"来源　　　{source_label(watched.source)}")
         if watched.last_error:
-            lines.append(f"最近错误：{escape_html(watched.last_error)}")
+            lines.append(f"\n⚠️ {escape_html(watched.last_error)}")
         return "\n".join(lines)
 
     async def cmd_add(self, domains: list[str]) -> str:
@@ -1065,12 +1098,12 @@ class Engine:
         if not events:
             return "暂无事件记录"
         icons = {"error": "❌", "warning": "⚠️", "info": "·"}
-        lines = [f"<b>最近 {len(events)} 条事件</b>"]
+        lines = [f"📜 <b>最近 {len(events)} 条事件</b>", ""]
         for event in events:
             icon = icons.get(event.level, "·")
             target = f" <code>{escape_html(event.domain)}</code>" if event.domain else ""
             lines.append(
-                f"{icon} {to_utc(event.created_at):%m-%d %H:%M}Z{target} "
-                f"{escape_html(event.message)}"
+                f"{icon} <i>{to_utc(event.created_at):%m-%d %H:%M}</i>{target}\n"
+                f"　　{escape_html(truncate(event.message, 120))}"
             )
         return "\n".join(lines)

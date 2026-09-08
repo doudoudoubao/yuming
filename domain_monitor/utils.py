@@ -131,6 +131,21 @@ def is_valid_domain(name: str) -> bool:
     return bool(_DOMAIN_RE.match(name or ""))
 
 
+def display_domain(name: str) -> str:
+    """把 punycode 还原成人看得懂的形式，仅用于展示。
+
+    内部一律存 ``xn--0zwm56d.com``，但界面上该显示「测试.com」。
+    还原失败就原样返回——展示层绝不能因为解码失败而报错。
+    """
+    text = (name or "").strip()
+    if "xn--" not in text.lower():
+        return text
+    try:
+        return text.encode("ascii").decode("idna")
+    except (UnicodeError, UnicodeDecodeError, ValueError):
+        return text
+
+
 def domain_labels(name: str) -> list[str]:
     return [label for label in normalize_domain(name).split(".") if label]
 
