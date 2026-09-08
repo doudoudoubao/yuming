@@ -592,6 +592,17 @@ registrars:
   绝不会因为查不到就去下单。
 - **配置自相矛盾会被拒绝启动。** 比如 `dry_run: false` 却把 provider 留成 `dryrun` ——
   这种「以为自己在抢注、其实什么都没做」的组合直接报错。
+- **开了真实下单却没填凭据，启动就拦。** 报错会点名缺哪一项、
+  对应哪个环境变量、去哪看填法：
+
+  ```
+  registrar 用的是 namesilo，但这些必填项是空的：api_key（环境变量 NAMESILO_API_KEY）。
+      填法见：domain-monitor registrar namesilo
+      还没准备好就先把 purchase.dry_run 设回 true
+  ```
+
+  不拦的话，域名释放那一刻才会发现，而且会对着同一个错误空转上百次，
+  抢注窗口早就过去了。GoDaddy / Namecheap 还会检查注册人资料是否填了。
 
 ### ⚠️ 开关一开，会买下所有当前可注册的域名
 

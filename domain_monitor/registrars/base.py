@@ -30,7 +30,9 @@ NOT_AVAILABLE_HINTS = (
 # 命中这些说明是配置/账户层面的硬错误——立刻停手
 FATAL_HINTS = (
     "insufficient", "not enough", "balance", "unauthorized", "authentication",
-    "invalid api", "api key", "forbidden", "permission", "suspended",
+    "invalid api", "api key", "api_key", "forbidden", "permission", "suspended",
+    # 配置本身就不全，重试多少次都是同样的结果，只会白白错过抢注窗口
+    "缺少必填配置", "缺少注册人信息", "缺少配置",
     "余额不足", "认证失败", "无权限",
 )
 

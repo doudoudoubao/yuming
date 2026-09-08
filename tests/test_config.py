@@ -86,7 +86,7 @@ def test_real_purchase_requires_price_cap():
         load_config(
             data={
                 "purchase": {"enabled": True, "dry_run": False, "max_price": 0},
-                "registrar": {"provider": "namesilo"},
+                "registrar": {"provider": "namesilo", "options": {"api_key": "k"}},
             }
         )
 
@@ -96,7 +96,7 @@ def test_real_purchase_requires_daily_budget():
         load_config(
             data={
                 "purchase": {"enabled": True, "dry_run": False, "daily_budget": 0},
-                "registrar": {"provider": "namesilo"},
+                "registrar": {"provider": "namesilo", "options": {"api_key": "k"}},
             }
         )
 
@@ -190,3 +190,83 @@ def test_multi_real_registrars_accepted():
         }
     )
     assert len(config.registrar_configs) == 2
+
+
+# ------------------------------------------------ 真实下单前的凭据完整性
+
+def test_real_purchase_requires_credentials():
+    """开了真实下单却没填 API Key，必须启动就拦。
+
+    不拦的话，域名释放那一刻才会发现，还会对着同一个错误空转上百次——
+    抢注窗口早就过去了。
+    """
+    with pytest.raises(ConfigError, match="必填项是空的"):
+        load_config(
+            data={
+                "purchase": {"enabled": True, "dry_run": False},
+                "registrar": {"provider": "namesilo", "options": {"api_key": ""}},
+            }
+        )
+
+
+def test_credential_error_names_the_env_var():
+    """报错要能直接照做，不能只说「缺配置」。"""
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(
+            data={
+                "purchase": {"enabled": True, "dry_run": False},
+                "registrar": {"provider": "namesilo"},
+            }
+        )
+    message = str(excinfo.value)
+    assert "NAMESILO_API_KEY" in message
+    assert "domain-monitor registrar namesilo" in message
+    assert "dry_run" in message                  # 告诉用户怎么退回安全状态
+
+
+def test_real_purchase_requires_contact_when_needed():
+    """GoDaddy / Namecheap 下单要提交注册人资料，空着一样下不了单。"""
+    with pytest.raises(ConfigError, match="注册人资料"):
+        load_config(
+            data={
+                "purchase": {"enabled": True, "dry_run": False},
+                "registrar": {
+                    "provider": "godaddy",
+                    "options": {"api_key": "k", "api_secret": "s"},
+                },
+            }
+        )
+
+
+def test_dry_run_does_not_require_credentials():
+    """演练模式不该被凭据校验挡住——它的用途就是没凭据也能跑通链路。"""
+    config = load_config(
+        data={
+            "purchase": {"enabled": True, "dry_run": True},
+            "registrar": {"provider": "namesilo", "options": {"api_key": ""}},
+        }
+    )
+    assert config.purchase.dry_run is True
+
+
+def test_monitor_only_does_not_require_credentials():
+    load_config(
+        data={
+            "purchase": {"enabled": False},
+            "registrar": {"provider": "namesilo"},
+        }
+    )
+
+
+def test_multi_registrar_credentials_all_checked():
+    """多通道时任何一家缺凭据都要报出来，并指明是第几个。"""
+    with pytest.raises(ConfigError, match=r"registrars\[1\]"):
+        load_config(
+            data={
+                "purchase": {"enabled": True, "dry_run": False},
+                "registrars": [
+                    {"provider": "namesilo", "options": {"api_key": "k"}},
+                    {"provider": "dynadot", "options": {"api_key": ""}},
+                ],
+            }
+        )

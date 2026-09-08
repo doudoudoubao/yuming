@@ -519,6 +519,44 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
     return config
 
 
+def _validate_credentials(config: AppConfig) -> None:
+    """开了真实下单，就必须把凭据填齐。
+
+    不拦的话，域名释放那一刻才会发现「缺少必填配置」，
+    而且会对着同一个错误空转上百次——窗口早就过去了。
+    """
+    from .registrars import PROVIDERS, env_var_name
+
+    for index, entry in enumerate(config.registrar_configs):
+        provider = (entry.provider or "dryrun").lower()
+        adapter = PROVIDERS.get(provider)
+        if adapter is None:
+            continue
+
+        where = f"registrars[{index}]" if config.registrars else "registrar"
+        missing = [
+            option for option in adapter.required_options
+            if not str(entry.options.get(option) or "").strip()
+        ]
+        if missing:
+            hints = "、".join(
+                f"{option}（环境变量 {env_var_name(provider, option)}）"
+                for option in missing
+            )
+            raise ConfigError(
+                f"{where} 用的是 {provider}，但这些必填项是空的：{hints}。\n"
+                f"    填法见：domain-monitor registrar {provider}\n"
+                f"    还没准备好就先把 purchase.dry_run 设回 true"
+            )
+
+        if adapter.needs_contact and not entry.contact:
+            raise ConfigError(
+                f"{where} 用的是 {provider}，下单需要注册人资料，"
+                f"但 {where}.contact 是空的。\n"
+                f"    填法见：domain-monitor registrar {provider}"
+            )
+
+
 def _validate(config: AppConfig) -> None:
     if config.poll.concurrency < 1:
         raise ConfigError("poll.concurrency 至少为 1")
@@ -553,6 +591,7 @@ def _validate(config: AppConfig) -> None:
             raise ConfigError(
                 f"purchase.dry_run=false 时必须配置真实的注册商，但 {where} 仍是 dryrun 假适配器"
             )
+        _validate_credentials(config)
         if config.purchase.max_price <= 0:
             raise ConfigError("purchase.max_price 必须大于 0，避免无上限下单")
         if config.purchase.daily_budget <= 0:

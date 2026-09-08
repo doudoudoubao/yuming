@@ -413,3 +413,35 @@ def test_contact_requirement_matches_the_code():
         assert provider.needs_contact == uses_contact, (
             f"{name} 的 needs_contact={provider.needs_contact} 与代码不符"
         )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "namesilo: 缺少必填配置 registrar.options.api_key",
+        "godaddy: 缺少注册人信息 registrar.contact.first_name",
+        "aliyun: 缺少必填配置 registrar.options.access_key_secret",
+    ],
+)
+def test_missing_config_is_never_retried(message):
+    """配置缺失重试多少次都是同样的结果，只会白白错过抢注窗口。"""
+    registrar = make("dryrun")
+    assert registrar.failure("a.com", message).retryable is False
+
+
+async def test_empty_credential_stops_after_one_attempt():
+    """凭据为空时应该一次就停，而不是把 max_attempts 全部空转掉。"""
+    from domain_monitor.registrars.pool import RegistrarPool
+
+    registrar = build_registrar(
+        RegistrarConfig(provider="namesilo", options={"api_key": ""})
+    )
+    pool = RegistrarPool([registrar])
+
+    winner, results = await pool.race_register(
+        "a.com", PurchaseConfig(), years=1, concurrency=1
+    )
+
+    assert winner is None
+    assert results and results[0].retryable is False
+    assert not pool.active            # 通道已被停用，不会再打
