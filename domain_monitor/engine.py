@@ -48,11 +48,13 @@ from .utils import (
     human_until,
     is_valid_domain,
     next_window_occurrence,
+    mask_secret,
     normalize_domain,
     tld_of,
-    truncate,
     to_utc,
+    truncate,
     utcnow,
+    write_dotenv,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,8 @@ class Engine:
         self.notifier = notifier
         self.probe = probe or DnsProbe(config.dns)
         self.bot = bot or NullBot()
+        # 由 Application 注入；命令行等场景没有热重载能力
+        self.reload_hook: Any = None
         self._stop = asyncio.Event()
         self._sprints: dict[str, asyncio.Task[None]] = {}
         self._acquiring: set[str] = set()
@@ -1244,6 +1248,91 @@ class Engine:
             await self.notifier.failed(watched.domain, f"手动下单异常：{exc}")
         finally:
             self._acquiring.discard(watched.domain)
+
+    def _writable_secret_names(self) -> dict[str, str]:
+        """允许写入的变量名 → 属于哪家注册商。
+
+        白名单是硬要求：否则拿到聊天权限的人就能往 .env 里写任意变量
+        （比如 HTTPS_PROXY），把流量引到别处。
+        """
+        from .registrars import credential_env_vars
+
+        return {
+            name: provider
+            for provider, names in credential_env_vars().items()
+            for name in names
+        }
+
+    async def cmd_reload(self) -> str:
+        """重新加载配置与密钥。"""
+        if self.reload_hook is None:
+            return "当前运行方式不支持热重载，请重启服务"
+        try:
+            return await self.reload_hook()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("重载失败")
+            return f"❌ 重载失败：{escape_html(exc)}"
+
+    async def cmd_setkey(self, name: str | None, value: str | None) -> str:
+        """在聊天里写入注册商凭据。默认关闭。"""
+        allowed = self._writable_secret_names()
+
+        if not self.config.telegram.allow_secret_input:
+            return (
+                "🔒 <b>没有开启聊天写密钥</b>\n\n"
+                "密钥会留在 Telegram 的聊天记录里（云端存储，非端到端加密），"
+                "这一条谁也消不掉，所以默认关着。\n\n"
+                "确实要用的话，在服务器上把 <code>telegram.allow_secret_input</code> "
+                "设成 true 再重启。\n"
+                "更稳的做法还是直接编辑服务器上的 .env 文件。"
+            )
+
+        if not name:
+            groups: dict[str, list[str]] = {}
+            for key, provider in allowed.items():
+                groups.setdefault(provider, []).append(key)
+            lines = ["🔑 <b>可写入的凭据</b>", ""]
+            for provider, keys in sorted(groups.items()):
+                lines.append(f"<b>{provider}</b>")
+                for key in keys:
+                    lines.append(f"　<code>{key}</code>")
+            lines += [
+                "",
+                "用法：<code>/setkey 变量名 值</code>",
+                "",
+                "⚠️ 发送后我会立刻尝试删除你那条消息，但<b>不保证成功</b>。"
+                "请自己确认聊天记录里没有残留。",
+            ]
+            return "\n".join(lines)
+
+        key = name.strip().upper()
+        if key not in allowed:
+            return (
+                f"❌ 不允许写入 <code>{escape_html(key)}</code>。\n"
+                f"只能写注册商凭据，发 /setkey 看清单。"
+            )
+        if not value:
+            return f"用法：<code>/setkey {escape_html(key)} 你的值</code>"
+
+        try:
+            write_dotenv(self.config.env_path, key, value)
+        except OSError as exc:
+            # 注意：异常信息里不能带上 value
+            logger.error("写入密钥文件失败: %s", exc)
+            return f"❌ 写入失败：{escape_html(str(exc))}"
+
+        # 绝不记录明文
+        logger.warning("已通过 Telegram 写入凭据 %s（值未记录）", key)
+        self.storage.add_event(
+            "secret_written", message=f"经 Telegram 写入 {key}", level="warning"
+        )
+        return (
+            f"✅ 已写入 <code>{escape_html(key)}</code> = "
+            f"<code>{escape_html(mask_secret(value))}</code>\n"
+            f"文件：<code>{escape_html(self.config.env_path)}</code>（权限 600）\n\n"
+            f"发 /reload 让它生效，或重启服务。\n"
+            f"⚠️ 请确认上面那条含密钥的消息已被删除。"
+        )
 
     async def cmd_mode(self, value: str | None, confirm: bool = False) -> str:
         """查看或切换下单模式。"""

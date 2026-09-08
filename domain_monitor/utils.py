@@ -305,6 +305,46 @@ def expand_patterns(
     return ordered
 
 
+def write_dotenv(path: str | os.PathLike[str], key: str, value: str) -> None:
+    """把一条 KEY=VALUE 写进 .env，已存在就替换。
+
+    整个文件重写后再改权限为 600——先建后改会有一小段时间是默认权限，
+    密钥文件不该有这个窗口。
+    """
+    file_path = Path(path)
+    lines: list[str] = []
+    if file_path.is_file():
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+
+    replaced = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        if stripped.split("=", 1)[0].strip() == key:
+            lines[index] = f"{key}={value}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{key}={value}")
+
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.chmod(file_path, 0o600)
+
+
+def mask_secret(value: str) -> str:
+    """只露出尾部几位，够用户确认没填错，又不至于泄露。"""
+    text = str(value)
+    if len(text) <= 4:
+        return "*" * len(text)
+    return "*" * (len(text) - 4) + text[-4:]
+
+
 def expand_env(value: Any, *, strict: bool = False) -> Any:
     """递归展开配置里的 ``${VAR}`` / ``${VAR:-默认值}``。"""
 

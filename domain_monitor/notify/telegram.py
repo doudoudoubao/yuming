@@ -61,6 +61,8 @@ HELP_SECTIONS["命令"] = """🌐 <b>域名监控</b> · 使用说明 1/3
 /del　移出监控
 /buy　立刻尝试注册
 /mode　查看或切换下单模式（监控 / 演练 / 真实）
+/setkey　写入注册商凭据（需在服务器上开启）
+/reload　改完配置或密钥后让它生效
 /auto　单独开关某个域名的自动下单
 /pause　暂停抢注 · /resume　恢复
 
@@ -99,10 +101,16 @@ HELP_SECTIONS["模式"] = """📐 使用说明 2/3 · <b>批量写法</b>
 
 HELP_SECTIONS["抢注"] = """🛒 使用说明 3/3 · <b>花钱规则与安全</b>
 
-<b>🔐 永远不要把凭据发给我</b>
-抢注<b>不需要</b>通过 Telegram 传账号、密码或 API Key。
-凭据只写在跑本程序那台服务器的 .env 里。
+<b>🔐 关于凭据</b>
+默认情况下<b>不要</b>把账号、密码或 API Key 发给我——
 我识别到疑似密钥会拒绝处理、不写日志，并提醒你去吊销。
+凭据应该写在跑本程序那台服务器的 .env 里。
+
+服务器上开启 allow_secret_input 之后，可以用
+<code>/setkey 变量名 值</code> 在这里写入注册商凭据。
+我会立刻删除你那条消息、只回显打码后的值、不写进日志，
+但<b>密钥仍会经过 Telegram 服务器</b>，这一条消不掉。
+写完发 /reload 生效。
 
 <b>三种模式，随时切</b>
 🔍 仅监控　　只看不买（出厂默认）
@@ -211,6 +219,8 @@ BOT_COMMANDS = [
     {"command": "pause", "description": "暂停自动抢注"},
     {"command": "resume", "description": "恢复自动抢注"},
     {"command": "mode", "description": "查看/切换下单模式"},
+    {"command": "setkey", "description": "写入注册商凭据（需服务器开启）"},
+    {"command": "reload", "description": "重新加载配置与密钥"},
     {"command": "auto", "description": "开关某个域名的自动下单"},
     {"command": "tlds", "description": "查看后缀合集"},
     {"command": "log", "description": "最近事件"},
@@ -233,6 +243,8 @@ class Controller(Protocol):
     async def cmd_tlds(self, name: str | None) -> str: ...
     async def cmd_auto(self, domain: str, value: str | None) -> str: ...
     async def cmd_mode(self, value: str | None, confirm: bool) -> str: ...
+    async def cmd_setkey(self, name: str | None, value: str | None) -> str: ...
+    async def cmd_reload(self) -> str: ...
 
 
 class TelegramClient:
@@ -334,6 +346,13 @@ class TelegramClient:
 
     async def answer_callback(self, callback_id: str, text: str = "") -> None:
         await self.call("answerCallbackQuery", callback_query_id=callback_id, text=text)
+
+    async def delete_message(self, chat_id: Any, message_id: int) -> bool:
+        """删掉一条消息。失败返回 False——调用方要如实告诉用户。"""
+        result = await self.call(
+            "deleteMessage", chat_id=chat_id, message_id=message_id
+        )
+        return result is not None
 
     async def edit_text(self, chat_id: Any, message_id: int, text: str) -> None:
         await self.call(
@@ -491,6 +510,19 @@ class TelegramBot:
             return
 
         if text.startswith("/"):
+            # 含密钥的命令先删消息再处理：即便后续出错，
+            # 明文也已经从聊天里消失了
+            if _carries_a_secret(text):
+                message_id = message.get("message_id")
+                deleted = False
+                if message_id:
+                    deleted = await self.client.delete_message(chat_id, message_id)
+                if not deleted:
+                    await self.client.send(
+                        "⚠️ <b>我删不掉你刚才那条消息</b>（可能超过 48 小时，"
+                        "或权限不足）。\n请<b>手动长按删除</b>，它里面有明文密钥。",
+                        chat_id=chat_id,
+                    )
             reply = await self._handle_command(text)
         else:
             reply = await self._handle_plain_text(text)
@@ -535,6 +567,13 @@ class TelegramBot:
             return await self.controller.cmd_pause(True)
         if command == "resume":
             return await self.controller.cmd_pause(False)
+        if command in ("setkey", "密钥", "setsecret"):
+            return await self.controller.cmd_setkey(
+                args[0] if args else None,
+                " ".join(args[1:]) if len(args) > 1 else None,
+            )
+        if command in ("reload", "重载", "重新加载"):
+            return await self.controller.cmd_reload()
         if command in ("mode", "模式", "下单"):
             confirm = len(args) > 1 and args[1].strip().lower() in (
                 "确认", "confirm", "yes", "y", "是"
@@ -723,6 +762,17 @@ def _is_bare_domain(token: str, groups: dict[str, list[str]] | None = None) -> b
     return bool(candidates) and all(
         is_valid_domain(normalize_domain(item)) for item in candidates
     )
+
+
+# 这些命令的参数里带明文密钥，消息必须立刻删掉
+_SECRET_COMMANDS = ("/setkey", "/密钥", "/setsecret")
+
+
+def _carries_a_secret(text: str) -> bool:
+    """这条命令里是不是带了明文密钥（带参数才算）。"""
+    head, _, tail = text.strip().partition(" ")
+    command = head.split("@", 1)[0].lower()
+    return command in _SECRET_COMMANDS and bool(tail.strip())
 
 
 def _looks_like_secret(text: str) -> bool:

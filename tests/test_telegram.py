@@ -585,7 +585,7 @@ async def test_help_sends_all_sections():
     joined = "\n".join(item["text"] for item in recorder.sent)
     assert "/list" in joined                    # 命令
     assert "@all" in joined                     # 批量写法
-    assert "永远不要把凭据发给我" in joined       # 安全
+    assert "凭据" in joined and "吊销" in joined   # 安全
 
 
 async def test_every_help_section_fits_one_message():

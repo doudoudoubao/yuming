@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 from typing import Any
 
@@ -13,11 +14,17 @@ from .engine import Engine
 from .models import DomainState, PurchaseMode
 from .notify.telegram import Notifier, NullBot, TelegramBot, TelegramClient
 from .rdap import RdapClient
-from .registrars import build_registrar
+from .registrars import build_registrar, credential_env_vars
 from .registrars.pool import RegistrarPool
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
+
+# 重载时需要让 .env 的新值覆盖进程里的旧值。只清这些名字，
+# 免得把 PATH 之类的系统变量也一起动了。
+_RELOADABLE_ENV = {
+    name for names in credential_env_vars().values() for name in names
+} | {"TG_CHAT_ID"}
 
 
 class Application:
@@ -46,6 +53,7 @@ class Application:
         if config.telegram.enabled and config.telegram.commands:
             self.bot = TelegramBot(self.telegram, config.telegram, self.engine)
         self.engine.bot = self.bot
+        self.engine.reload_hook = self.reload
 
     async def start(self) -> None:
         await asyncio.gather(
@@ -113,6 +121,61 @@ class Application:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def reload(self) -> str:
+        """重新读配置和 .env，并重建注册商通道。
+
+        改完密钥不用重启服务——否则手机上写完密钥还得去登服务器，
+        这个功能就没意义了。
+        """
+        from .cli import load_env_files
+        from .config import ConfigError, load_config
+
+        if not self.config.path:
+            return "当前没有使用配置文件，无法重载"
+
+        # .env 里的新值要能盖掉进程里已有的旧值，否则读不到刚写的密钥
+        before = dict(os.environ)
+        try:
+            for name in list(os.environ):
+                if name in _RELOADABLE_ENV:
+                    del os.environ[name]
+            load_env_files(self.config.path)
+            fresh = load_config(self.config.path)
+        except ConfigError as exc:
+            os.environ.clear()
+            os.environ.update(before)
+            return f"❌ 配置有误，已保持原样：{exc}"
+        except OSError as exc:
+            os.environ.clear()
+            os.environ.update(before)
+            return f"❌ 读取配置失败：{exc}"
+
+        old_pool = self.pool
+        try:
+            pool = RegistrarPool(
+                [build_registrar(item) for item in fresh.registrar_configs]
+            )
+            await pool.start()
+        except Exception as exc:  # noqa: BLE001 - 重建失败要保住原来能用的通道
+            logger.exception("重建注册商通道失败")
+            return f"❌ 注册商配置有问题，已保持原样：{exc}"
+
+        self.config = fresh
+        self.pool = pool
+        self.engine.config = fresh
+        self.engine.registrar = pool
+        await old_pool.close()
+
+        added, removed = self.storage.sync_config_domains(fresh.domains)
+        logger.warning("配置已重载：%d 个注册商通道", len(pool))
+
+        parts = [f"✅ 已重新加载配置", f"🏬 通道 {'、'.join(pool.labels)}"]
+        if added:
+            parts.append(f"➕ 新增 {len(added)} 个域名")
+        if removed:
+            parts.append(f"➖ 移除 {len(removed)} 个域名")
+        return "\n".join(parts)
 
     async def startup_notice(self) -> None:
         """启动时报个到，把「接下来会不会花钱」说清楚。"""

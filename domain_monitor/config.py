@@ -90,6 +90,10 @@ class TelegramConfig:
     api_base: str = "https://api.telegram.org"
     timeout: float = 20.0
     silent_idle: bool = True          # 状态没变化时不推送
+    # 允许在聊天里用 /setkey 写入注册商凭据吗？
+    # 默认关闭：密钥会留在 Telegram 的聊天记录里（云端存储，非端到端加密），
+    # 这一条谁也消不掉。要用请自行权衡，并在写完后立刻删除那条消息。
+    allow_secret_input: bool = False
     notify_states: list[str] = field(
         default_factory=lambda: ["expired", "redemption", "pending_delete", "available", "acquired"]
     )
@@ -208,6 +212,13 @@ class AppConfig:
     @property
     def bootstrap_cache_path(self) -> str:
         return self.resolve(self.rdap.bootstrap_cache)
+
+    @property
+    def env_path(self) -> str:
+        """密钥文件位置。跟配置文件同目录。"""
+        if self.path:
+            return str(Path(self.path).resolve().parent / ".env")
+        return self.resolve(".env")
 
     @property
     def registrar_configs(self) -> list[RegistrarConfig]:

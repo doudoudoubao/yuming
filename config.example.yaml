@@ -95,6 +95,10 @@ telegram:
   allowed_user_ids: []                # 只允许这些 user id 发命令；留空则只认 chat_id
   commands: true                      # 开启 /add /list /buy 等双向命令（也支持直接发域名）
   poll_timeout: 30
+  allow_secret_input: false # 允许在聊天里用 /setkey 写注册商凭据吗？
+                            # 默认关闭：密钥会留在 Telegram 聊天记录里
+                            # （云端存储、非端到端加密），这一条消不掉。
+                            # 更稳的做法是直接编辑服务器上的 .env
   silent_idle: true         # 非紧急状态变化静音推送（不震手机），可注册/待删除仍会正常提醒
   # 哪些状态变化要推送（其余只记日志）
   notify_states: ["expired", "redemption", "pending_delete", "available", "acquired"]
