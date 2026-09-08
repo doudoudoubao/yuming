@@ -447,8 +447,30 @@ class Engine:
 
     # -------------------------------------------------------------------- 冲刺
 
+    def _will_buy(self, watched: WatchedDomain) -> bool:
+        """这个域名到底会不会被自动买？
+
+        冲刺（亚秒级 DNS 探测）唯一的意义是抢在别人前面下单。
+        只通知不买的域名开冲刺，等于为一场不参加的比赛冲刺——
+        默认参数下一个域名会白跑一万多次探测。
+        """
+        if not self.purchase.enabled or self.paused:
+            return False
+        if watched.state is DomainState.ACQUIRED or not watched.enabled:
+            return False
+        return self.auto_buy_allowed(watched)
+
     def _sync_sprint(self, domain: str, phase: Phase, drop_at: datetime | None) -> None:
-        """根据档位启动或收掉冲刺任务。"""
+        """根据档位启动或收掉冲刺任务。
+
+        只有「确实会下单」的域名才值得冲刺；其余的靠 near 档
+        （默认 1 分钟一次 RDAP）通知就够了。
+        """
+        watched = self.storage.get_domain(domain)
+        if phase == Phase.SPRINT and (watched is None or not self._will_buy(watched)):
+            logger.info("%s 到了冲刺档，但它不会被自动下单，只做常规监控", domain)
+            phase = Phase.NEAR
+
         task = self._sprints.get(domain)
         if phase == Phase.SPRINT:
             if task is None or task.done():

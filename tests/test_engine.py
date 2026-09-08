@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import httpx
@@ -534,7 +535,10 @@ class StubProbe:
 
 
 async def test_sprint_task_starts_and_stops_with_phase(rdap_server, storage):
-    engine = build_engine(rdap_server, storage)
+    # 冲刺只为会下单的域名开，所以这里得把下单功能打开
+    engine = build_engine(rdap_server, storage,
+                          purchase={"enabled": True, "dry_run": True})
+    storage.upsert_domain("target.com")
     drop_at = utcnow() + timedelta(seconds=30)
 
     engine._sync_sprint("target.com", Phase.SPRINT, drop_at)
@@ -1427,3 +1431,95 @@ async def test_mode_switch_actually_stops_buying(rdap_server, storage):
     rdap_server.set("b.com", None)
     await engine.run_once()
     assert storage.get_domain("b.com").state is DomainState.AVAILABLE     # 只通知
+
+
+# ------------------------------------------------- 冲刺只为真正要买的域名开
+
+async def test_monitor_only_mode_does_not_sprint(rdap_server, storage):
+    """纯监控时开冲刺是纯浪费——为一场不参加的比赛做亚秒级探测。
+
+    默认参数下一个域名会白跑一万多次 DNS 探测。
+    """
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": False},
+        dns={"enabled": True, "interval": 0.01},
+        poll={"jitter": 0.0, "sprint_tail": 0.2},
+    )
+    storage.upsert_domain("watch.com")
+    engine.probe = StubProbe([ProbeResult.DELEGATED] * 50)
+
+    engine._sync_sprint("watch.com", Phase.SPRINT, utcnow())
+    await asyncio.sleep(0.1)
+
+    assert "watch.com" not in engine._sprints
+    assert engine.probe.calls == 0
+
+
+async def test_notify_only_domain_does_not_sprint(rdap_server, storage):
+    """同一批域名里，只通知的那些不该跟着冲刺。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True},
+        dns={"enabled": True, "interval": 0.01},
+        poll={"jitter": 0.0, "sprint_tail": 0.2},
+    )
+    storage.upsert_domain("buy.com", auto_buy=True)
+    storage.upsert_domain("watch.com", auto_buy=False)
+    engine.probe = StubProbe([ProbeResult.DELEGATED] * 50)
+
+    engine._sync_sprint("buy.com", Phase.SPRINT, utcnow())
+    engine._sync_sprint("watch.com", Phase.SPRINT, utcnow())
+
+    assert "buy.com" in engine._sprints
+    assert "watch.com" not in engine._sprints
+    await engine._cancel_sprints()
+
+
+async def test_paused_does_not_sprint(rdap_server, storage):
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True},
+        dns={"enabled": True, "interval": 0.01},
+        poll={"jitter": 0.0, "sprint_tail": 0.2},
+    )
+    storage.upsert_domain("a.com")
+    engine.set_paused(True)
+
+    engine._sync_sprint("a.com", Phase.SPRINT, utcnow())
+
+    assert "a.com" not in engine._sprints
+
+
+async def test_buying_domain_still_sprints(rdap_server, storage):
+    """别把该冲的也一起挡掉了。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True},
+        dns={"enabled": True, "interval": 0.01},
+        poll={"jitter": 0.0, "sprint_tail": 0.2},
+    )
+    storage.upsert_domain("a.com")
+    engine.probe = StubProbe([ProbeResult.DELEGATED] * 50)
+
+    engine._sync_sprint("a.com", Phase.SPRINT, utcnow())
+    await asyncio.sleep(0.05)
+
+    assert "a.com" in engine._sprints
+    assert engine.probe.calls > 0
+    await engine._cancel_sprints()
+
+
+async def test_notify_only_domain_still_gets_state_updates(rdap_server, storage):
+    """不冲刺不等于不监控——状态变化和通知照常。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "auto_buy_default": False},
+    )
+    storage.upsert_domain("watch.com")
+    rdap_server.set("watch.com", rdap_payload(statuses=["pending delete"]))
+
+    await engine.run_once()
+
+    assert storage.get_domain("watch.com").state is DomainState.PENDING_DELETE
+    assert "state_change" in [event.kind for event in storage.recent_events(10)]
