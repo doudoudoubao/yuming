@@ -82,6 +82,9 @@ class Engine:
         self._stop = asyncio.Event()
         self._sprints: dict[str, asyncio.Task[None]] = {}
         self._acquiring: set[str] = set()
+        # 当日成交名额的「在途占位」。并发抢注时光查数据库会全部读到 0，
+        # 于是一起放行——必须在放行的那一刻同步占位。
+        self._inflight_purchases = 0
         self._semaphore = asyncio.Semaphore(config.poll.concurrency)
         self.started_at = utcnow()
 
@@ -534,10 +537,48 @@ class Engine:
         purchase = self.config.purchase
         price_limit = watched.max_price if watched.max_price is not None else purchase.max_price
         years = watched.years or purchase.years
+
+        self.pool.reset()
+
+        # 笔数闸门放在最前面：金额预算拦不住「一次性买下一堆便宜域名」。
+        # 盯 58 个后缀时可能有十几个当前就是空的，开关一开会被一次性全买走。
+        reserved = False
+        if not purchase.dry_run:
+            if not self._reserve_purchase_slot():
+                bought = self.storage.acquisitions_today()
+                message = (
+                    f"今天已成交 {bought} 个，达到每日上限 {purchase.max_per_day} 个，"
+                    f"本次跳过。确认无误可调大 purchase.max_per_day"
+                )
+                logger.error("%s %s", domain, message)
+                self.storage.add_event(
+                    "quota_reject", domain=domain, message=message, level="error"
+                )
+                await self.notifier.failed(domain, message)
+                return None
+            reserved = True
+
+        try:
+            return await self._acquire_inner(
+                watched, domain, purchase, price_limit, years, reason, fast
+            )
+        finally:
+            if reserved:
+                self._release_purchase_slot()
+
+    async def _acquire_inner(
+        self,
+        watched: WatchedDomain,
+        domain: str,
+        purchase: Any,
+        price_limit: float,
+        years: int,
+        reason: str,
+        fast: bool,
+    ) -> RegistrationResult | None:
         price: float | None = None
         currency = purchase.currency
 
-        self.pool.reset()
         if fast:
             logger.info("%s 冲刺下单，跳过比价直接开抢", domain)
         elif purchase.check_price_first:
@@ -570,6 +611,22 @@ class Engine:
                 return None
 
         return await self._attempt_loop(domain, years, price_limit, reason)
+
+    def _reserve_purchase_slot(self) -> bool:
+        """占一个当日成交名额；占不到返回 False。
+
+        必须是同步的：中间一旦有 await，并发的其它域名就会插进来，
+        大家都读到同一个旧计数，闸门形同虚设。
+        """
+        used = self.storage.acquisitions_today() + self._inflight_purchases
+        if used >= self.config.purchase.max_per_day:
+            return False
+        self._inflight_purchases += 1
+        return True
+
+    def _release_purchase_slot(self) -> None:
+        """释放在途占位。成功的那一笔已经落进数据库，不会漏计。"""
+        self._inflight_purchases = max(0, self._inflight_purchases - 1)
 
     async def _resolve_price(
         self, domain: str, price_limit: float
@@ -867,7 +924,8 @@ class Engine:
             )
         if not purchase.dry_run and purchase.enabled:
             lines.append(
-                f"💰 今日花费 {stats['spend_today']:.2f} / {purchase.daily_budget:.2f}"
+                f"💰 今日 {stats['acquired_today']}/{purchase.max_per_day} 个 · "
+                f"{stats['spend_today']:.2f}/{purchase.daily_budget:.2f}"
             )
         if not self.probe.usable:
             lines.append("\n⚠️ DNS 探测不可用，冲刺会慢一些（装 dnspython 可解决）")

@@ -102,6 +102,9 @@ class PurchaseConfig:
     years: int = 1
     max_price: float = 50.0           # 单域名价格上限
     daily_budget: float = 200.0       # 每日累计花费上限
+    # 每天最多买几个。金额预算拦不住「一次性买下一堆便宜域名」——
+    # 盯 58 个后缀时可能有十几个当前就是空的，开关一开会全部买走。
+    max_per_day: int = 3
     currency: str = "USD"
     max_attempts: int = 120           # 单个域名单次冲刺的最大下单次数
     attempt_interval: float = 0.5     # 两次下单之间的间隔
@@ -497,6 +500,8 @@ def _validate(config: AppConfig) -> None:
         raise ConfigError("purchase.years 至少为 1")
     if config.purchase.attempt_concurrency < 1:
         raise ConfigError("purchase.attempt_concurrency 至少为 1")
+    if config.purchase.max_per_day < 1:
+        raise ConfigError("purchase.max_per_day 至少为 1（设 0 请改用 enabled=false）")
 
     if config.telegram.enabled:
         if not config.telegram.bot_token:

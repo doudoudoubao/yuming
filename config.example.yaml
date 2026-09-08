@@ -103,7 +103,10 @@ purchase:
   dry_run: true             # ← 演练开关。改 false 才会真的花钱！
   years: 1
   max_price: 50             # 单个域名价格上限（超过就放弃，防溢价域名天价）
-  daily_budget: 200         # 每日累计消费上限，防止脚本失控刷单
+  daily_budget: 200         # 每日累计消费上限（金额）
+  max_per_day: 3            # 每日最多买几个（笔数）——这条比金额上限更重要！
+                            # 你盯的一批后缀里往往有好几个本来就没人注册，
+                            # 开关一开会被一次性全买走，金额预算拦不住
   currency: "USD"
   max_attempts: 120         # 单次冲刺最多下单几次
   attempt_interval: 0.5     # 两轮下单之间的间隔

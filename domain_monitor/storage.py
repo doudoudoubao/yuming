@@ -399,6 +399,17 @@ class Storage:
             ).fetchone()
         return float(row["total"] or 0.0)
 
+    def acquisitions_today(self, *, now: datetime | None = None) -> int:
+        """今天（UTC）真实买成了几个。演练不计入。"""
+        day = to_utc(now or utcnow()).strftime("%Y-%m-%d")
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS n FROM purchases
+                    WHERE success = 1 AND dry_run = 0 AND substr(created_at, 1, 10) = ?""",
+                (day,),
+            ).fetchone()
+        return int(row["n"] or 0)
+
     def has_successful_purchase(self, domain: str) -> bool:
         with self._lock:
             row = self._conn.execute(
@@ -435,6 +446,7 @@ class Storage:
             "purchase_attempts": purchases["attempts"] or 0,
             "purchase_wins": purchases["wins"] or 0,
             "spend_today": self.spend_today(),
+            "acquired_today": self.acquisitions_today(),
         }
 
     # ------------------------------------------------------------------ KV 存储

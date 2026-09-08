@@ -10,6 +10,7 @@ from typing import Any
 from .config import AppConfig
 from .dnsprobe import DnsProbe
 from .engine import Engine
+from .models import DomainState
 from .notify.telegram import Notifier, NullBot, TelegramBot, TelegramClient
 from .rdap import RdapClient
 from .registrars import build_registrar
@@ -114,22 +115,63 @@ class Application:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def startup_notice(self) -> None:
-        """启动时给 Telegram 报个到，顺便说明当前是不是真的会下单。"""
+        """启动时报个到，把「接下来会不会花钱」说清楚。"""
+        purchase = self.config.purchase
+        count = len(self.storage.list_domains(enabled_only=True))
+
+        if not purchase.enabled:
+            mode = "🔍 仅监控，不会下单"
+        elif purchase.dry_run:
+            mode = "🧪 演练模式，不会真的花钱"
+        else:
+            mode = (
+                f"💸 <b>真实下单已开启</b>\n"
+                f"　　每天最多 {purchase.max_per_day} 个 · "
+                f"单价上限 {purchase.max_price:.0f} · 日预算 {purchase.daily_budget:.0f}"
+            )
+            # 真金白银模式下，先把「已经空着、开机就会被买走」的域名报出来。
+            # 用户往往是盯了一批后缀之后才开开关，其中不少本来就没人注册。
+            await self._warn_about_immediate_buys()
+
         if not self.telegram.enabled:
             return
-        purchase = self.config.purchase
-        if not purchase.enabled:
-            mode = "仅监控（不会下单）"
-        elif purchase.dry_run:
-            mode = "演练 dry-run（不会真的下单）"
-        else:
-            mode = f"⚠️ 真实下单（单价上限 {purchase.max_price:.2f}，日预算 {purchase.daily_budget:.2f}）"
-        count = len(self.storage.list_domains(enabled_only=True))
         await self.notifier.send(
-            "🚀 <b>域名监控已启动</b>\n"
-            f"监控域名：{count}\n"
-            f"注册商通道：<code>{'、'.join(self.pool.labels)}</code>\n"
-            f"模式：{mode}\n"
-            "发送 /help 查看命令",
-            quiet=True,
+            "🚀 <b>域名监控已启动</b>\n\n"
+            f"🗒 在盯 {count} 个域名\n"
+            f"🏬 通道 {'、'.join(self.pool.labels)}\n"
+            f"{mode}\n\n"
+            "发 /help 查看用法",
+            quiet=not (purchase.enabled and not purchase.dry_run),
         )
+
+    async def _warn_about_immediate_buys(self) -> None:
+        """真实下单模式启动时，提醒哪些域名会被立刻买走。"""
+        already = [
+            item.domain
+            for item in self.storage.list_domains(enabled_only=True)
+            if item.state is DomainState.AVAILABLE
+        ]
+        if not already:
+            return
+
+        preview = "、".join(already[:8])
+        if len(already) > 8:
+            preview += f" 等 {len(already)} 个"
+        logger.warning(
+            "⚠️ 真实下单已开启，有 %d 个域名上次检查时就是可注册状态，"
+            "启动后会立刻尝试买下（受每日 %d 个上限约束）：%s",
+            len(already), self.config.purchase.max_per_day, preview,
+        )
+        self.storage.add_event(
+            "startup_pending_buys",
+            message=f"启动时有 {len(already)} 个域名处于可注册状态：{preview}",
+            level="warning",
+        )
+        if self.telegram.enabled:
+            await self.notifier.send(
+                f"⚠️ <b>注意</b>：有 {len(already)} 个域名现在就是可注册状态，\n"
+                f"启动后会<b>立刻尝试买下</b>（每天最多 "
+                f"{self.config.purchase.max_per_day} 个）：\n"
+                f"<code>{preview}</code>\n\n"
+                f"不想买就先发 /pause"
+            )

@@ -1068,3 +1068,100 @@ async def test_cmd_tlds_lists_and_details(rdap_server, storage):
     assert "io" in detail_at
 
     assert "没有" in await engine.cmd_tlds("nosuch")
+
+
+# ------------------------------------------------------- 每日成交笔数上限
+
+async def test_daily_count_cap_stops_mass_buying(rdap_server, storage):
+    """开关一开就把所有当前可注册的域名全买走，是最贵的一种翻车。
+
+    盯 58 个后缀时很可能有十几个冷门后缀本来就没人注册。
+    """
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "daily_budget": 500, "max_per_day": 3,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+        registrar={"provider": "dryrun", "options": {"price": 9.0}},
+    )
+    for index in range(8):
+        storage.upsert_domain(f"vps{index}.com")
+        rdap_server.set(f"vps{index}.com", None)      # 8 个全都可注册
+
+    await engine.run_once()
+
+    bought = [item for item in storage.recent_purchases(20) if item["success"]]
+    assert len(bought) == 3
+    assert storage.acquisitions_today() == 3
+    assert "quota_reject" in [event.kind for event in storage.recent_events(30)]
+
+
+async def test_count_cap_survives_concurrency(rdap_server, storage):
+    """名额必须同步占位。
+
+    run_once 是并发的，若只查数据库，所有协程都会读到同一个旧计数，
+    然后一起放行——闸门形同虚设。
+    """
+    engine = build_engine(
+        rdap_server, storage,
+        poll={"jitter": 0.0, "concurrency": 16},       # 拉高并发放大竞态
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "daily_budget": 9999, "max_per_day": 2,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+        registrar={"provider": "dryrun", "options": {"price": 1.0, "latency": 0.02}},
+    )
+    for index in range(12):
+        storage.upsert_domain(f"race{index}.com")
+        rdap_server.set(f"race{index}.com", None)
+
+    await engine.run_once()
+
+    assert storage.acquisitions_today() == 2
+    assert engine._inflight_purchases == 0            # 占位都释放干净了
+
+
+async def test_failed_attempt_releases_its_slot(rdap_server, storage):
+    """买失败不该白占名额。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_price": 50,
+                  "max_per_day": 2, "attempt_interval": 0,
+                  "attempt_concurrency": 1, "max_attempts": 1},
+        registrar={"provider": "dryrun", "options": {"always_fail": True}},
+    )
+    storage.upsert_domain("flop.com")
+    rdap_server.set("flop.com", None)
+
+    await engine.run_once()
+
+    assert storage.acquisitions_today() == 0
+    assert engine._inflight_purchases == 0
+
+
+async def test_dry_run_is_not_capped(rdap_server, storage):
+    """演练不花钱，不该被笔数上限挡住——否则没法完整验证链路。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "max_per_day": 1,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+    )
+    for index in range(5):
+        storage.upsert_domain(f"demo{index}.com")
+        rdap_server.set(f"demo{index}.com", None)
+
+    await engine.run_once()
+
+    acquired = [item for item in storage.list_domains()
+                if item.state is DomainState.ACQUIRED]
+    assert len(acquired) == 5
+    assert storage.acquisitions_today() == 0       # 演练不计入真实成交
+
+
+async def test_status_shows_daily_quota(rdap_server, storage):
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": False, "max_per_day": 5},
+        registrar={"provider": "dryrun"},
+    )
+    text = await engine.cmd_status()
+    assert "/5 个" in text
