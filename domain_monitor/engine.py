@@ -34,8 +34,10 @@ from .registrars.base import Registrar
 from .registrars.pool import RegistrarPool
 from .storage import Storage
 from .utils import (
+    PatternError,
     apply_jitter,
     escape_html,
+    expand_patterns,
     human_delta,
     human_until,
     is_valid_domain,
@@ -758,7 +760,40 @@ class Engine:
             data=result.to_dict(),
         )
         await self.notifier.acquired(result.domain, detail)
+        await self._retire_group_siblings(result.domain)
         return result
+
+    async def _retire_group_siblings(self, domain: str) -> None:
+        """同一个前缀展开出来的一组域名，抢到任意一个之后把其余的撤下来。
+
+        场景是「这个名字我要，哪个后缀都行」——已经拿到手了就没必要
+        继续盯着 .net .io 白烧配额。
+        """
+        watched = self.storage.get_domain(domain)
+        if watched is None or not watched.stop_after_first or not watched.group:
+            return
+
+        siblings = self.storage.group_siblings(domain)
+        if not siblings:
+            return
+
+        for item in siblings:
+            self.storage.set_enabled(item.domain, False)
+            task = self._sprints.pop(item.domain, None)
+            if task is not None and not task.done():
+                task.cancel()
+
+        names = "、".join(item.domain for item in siblings)
+        message = f"已抢到同组的 {domain}，停止监控同组其余 {len(siblings)} 个：{names}"
+        logger.warning(message)
+        self.storage.add_event(
+            "group_retired", domain=domain, message=message, level="warning"
+        )
+        await self.notifier.send(
+            f"🧹 已拿到 <b>{escape_html(domain)}</b>，"
+            f"同组另外 {len(siblings)} 个已停止监控：\n"
+            f"<code>{escape_html(names)}</code>"
+        )
 
     # ------------------------------------------------- Telegram 命令（Controller）
 
@@ -883,8 +918,14 @@ class Engine:
         return "\n".join(lines)
 
     async def cmd_add(self, domains: list[str]) -> str:
+        # 支持 mydream.{com,net,io} 这种一次加一批的写法
+        try:
+            expanded = expand_patterns(domains, limit=self.config.pattern_limit)
+        except PatternError as exc:
+            return f"❌ {escape_html(exc)}"
+
         added, skipped, invalid = [], [], []
-        for raw in domains[:20]:
+        for raw in expanded[: self.config.pattern_limit]:
             name = normalize_domain(raw)
             if not is_valid_domain(name):
                 invalid.append(raw)

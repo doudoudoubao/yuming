@@ -131,3 +131,51 @@ def test_stats(storage: Storage):
     assert stats["by_state"]["pending_delete"] == 1
     assert stats["purchase_wins"] == 1
     assert stats["spend_today"] == 8.0
+
+
+def test_legacy_database_is_migrated(tmp_path):
+    """已有用户升级时不能撞上 no such column。"""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE domains (
+            domain TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'unknown',
+            statuses TEXT NOT NULL DEFAULT '[]', registrar TEXT, expires_at TEXT,
+            drop_at TEXT, pending_delete_since TEXT, last_checked_at TEXT,
+            next_check_at TEXT, phase TEXT NOT NULL DEFAULT 'idle',
+            attempts INTEGER NOT NULL DEFAULT 0, max_price REAL, years INTEGER,
+            note TEXT, source TEXT NOT NULL DEFAULT 'config',
+            enabled INTEGER NOT NULL DEFAULT 1, added_at TEXT NOT NULL,
+            acquired_at TEXT);
+        CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL, kind TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'info', domain TEXT,
+            message TEXT NOT NULL DEFAULT '', data TEXT);
+        CREATE TABLE purchases (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL, domain TEXT NOT NULL, provider TEXT NOT NULL,
+            success INTEGER NOT NULL, order_id TEXT, price REAL, currency TEXT,
+            dry_run INTEGER NOT NULL DEFAULT 0, message TEXT, raw TEXT);
+        CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+        """
+    )
+    conn.execute(
+        "INSERT INTO domains (domain, state, added_at, max_price) "
+        "VALUES ('legacy.com', 'registered', '2026-01-01T00:00:00+00:00', 42.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    with Storage(path) as store:
+        item = store.get_domain("legacy.com")
+        assert item.max_price == 42.0            # 旧数据完好
+        assert item.group is None                # 新列有默认值
+        assert item.stop_after_first is False
+        store.upsert_domain("new.com", group="prefix:x", stop_after_first=True)
+        assert store.get_domain("new.com").stop_after_first is True
+
+    # 幂等：再开一次不该出错
+    with Storage(path) as store:
+        assert store.get_domain("legacy.com") is not None

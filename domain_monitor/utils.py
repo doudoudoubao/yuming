@@ -10,7 +10,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -182,6 +182,79 @@ def load_dotenv(path: str | os.PathLike[str]) -> int:
         os.environ[key] = value
         count += 1
     return count
+
+
+class PatternError(ValueError):
+    """域名模式写得不对。"""
+
+
+_BRACE_RE = re.compile(r"\{([^{}]*)\}")
+DEFAULT_PATTERN_LIMIT = 200
+
+
+def expand_pattern(text: str, *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str]:
+    """展开花括号写法，一个前缀盯多个后缀。
+
+    ``mydream.{com,net,io}`` → ``mydream.com`` / ``mydream.net`` / ``mydream.io``
+    ``{a,b}.{com,cn}``       → 四个组合
+
+    没有花括号就原样返回单元素列表，所以可以无脑套在任何接受域名的地方。
+    展开结果做去重且保持书写顺序；超过 ``limit`` 直接报错，
+    免得一个手滑的模式生成几千个域名把 RDAP 打爆。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if "{" not in text and "}" not in text:
+        return [text]
+    if text.count("{") != text.count("}"):
+        raise PatternError(f"花括号没配对: {text}")
+
+    results = [text]
+    while True:
+        match = _BRACE_RE.search(results[0])
+        if match is None:
+            break
+        options = [item.strip() for item in match.group(1).split(",")]
+        options = [item for item in options if item]
+        if not options:
+            raise PatternError(f"花括号里是空的: {text}")
+
+        expanded: list[str] = []
+        for candidate in results:
+            spot = _BRACE_RE.search(candidate)
+            if spot is None:
+                expanded.append(candidate)
+                continue
+            head, tail = candidate[: spot.start()], candidate[spot.end():]
+            for option in options:
+                expanded.append(f"{head}{option}{tail}")
+            if len(expanded) > limit:
+                raise PatternError(
+                    f"模式 {text} 展开后超过 {limit} 个域名，请拆小一点"
+                )
+        results = expanded
+
+    # 去重但保持书写顺序
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in results:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def expand_patterns(items: Iterable[str], *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str]:
+    """批量展开，结果整体去重。"""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        for name in expand_pattern(item, limit=limit):
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+    return ordered
 
 
 def expand_env(value: Any, *, strict: bool = False) -> Any:

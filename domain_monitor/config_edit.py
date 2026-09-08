@@ -22,8 +22,12 @@ def _block_range(lines: list[str], key: str) -> tuple[int, int]:
     end = len(lines)
     for index in range(start + 1, len(lines)):
         line = lines[index]
-        # 顶层的下一个键（非缩进、非空、非注释）就是本段结束
-        if line.strip() and not line[0].isspace() and not line.startswith("#"):
+        if not line.strip():
+            continue
+        # 顶格的任何内容都算下一段的开始——包括顶格注释。
+        # 顶格注释就是分段标志（"# ---- 前缀监控"），把它算进本段的话，
+        # 改写这一段会顺手删掉下一段的整段文档。
+        if not line[0].isspace():
             end = index
             break
     return start, end

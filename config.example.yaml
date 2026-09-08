@@ -11,6 +11,7 @@ log_level: "INFO"
 # log_file: "./data/monitor.log"
 
 # ---------------------------------------------------------------- 监控的域名
+# 支持花括号写法一次写一批：mydream.{com,net,io}
 domains:
   - example.com                      # 简写形式
   - name: mydream.io                 # 完整形式，可以单独覆盖参数
@@ -19,6 +20,21 @@ domains:
     note: "主力目标"
   - name: 短域名.cn
     max_price: 100
+
+# ------------------------------------------------- 前缀监控（一个名字，多个后缀）
+# 「这个名字我要，哪个后缀都行」——展开成一批域名一起盯。
+# stop_after_first: true 表示抢到其中任意一个之后，同组其余的自动停止监控。
+# prefixes:
+#   - name: mydream               # 也可以写成列表 [mydream, dreamy]
+#     tlds: [com, net, io, cn]
+#     max_price: 80
+#     stop_after_first: true      # 默认就是 true
+#   - name: [short, tiny]
+#     tlds: [com]
+#     stop_after_first: false     # 每个都想要，就关掉
+
+# 一条模式最多能展开出多少个域名，防手滑
+pattern_limit: 200
 
 # ---------------------------------------------------------------- 轮询节奏
 # 按「距离预测释放时间还有多久」自动分档提速，单位都是秒。

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from typing import Any, Iterable
 
 from .models import DomainState, Event, Phase, RegistrationResult, WatchedDomain
 from .utils import iso, parse_datetime, to_utc, utcnow
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS domains (
@@ -34,6 +37,8 @@ CREATE TABLE IF NOT EXISTS domains (
     years                INTEGER,
     note                 TEXT,
     source               TEXT NOT NULL DEFAULT 'config',
+    group_name           TEXT,
+    stop_after_first     INTEGER NOT NULL DEFAULT 0,
     enabled              INTEGER NOT NULL DEFAULT 1,
     added_at             TEXT NOT NULL,
     acquired_at          TEXT,
@@ -69,10 +74,15 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT
 );
 
+"""
+
+# 索引单独一段：老库要先补完列才能建这些索引。
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_events_created  ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_domain   ON events(domain, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_purchases_time  ON purchases(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_domains_next    ON domains(enabled, next_check_at);
+CREATE INDEX IF NOT EXISTS idx_domains_group   ON domains(group_name);
 """
 
 
@@ -94,8 +104,31 @@ class Storage:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         with self._lock:
-            self._conn.executescript(SCHEMA)
+            self._conn.executescript(SCHEMA)   # 建表（已存在则空操作）
+            self._migrate()                     # 给老库补新增的列
+            self._conn.executescript(INDEXES)   # 索引可能引用新列，必须最后建
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """给已经存在的老库补上后来新增的列。
+
+        CREATE TABLE IF NOT EXISTS 对已存在的表是空操作，所以新增列必须
+        单独 ALTER，否则升级后的用户会撞上 no such column。
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(domains)").fetchall()
+        }
+        additions = {
+            "group_name": "TEXT",
+            "stop_after_first": "INTEGER NOT NULL DEFAULT 0",
+            "redemption_since": "TEXT",
+            "last_error": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                logger.info("升级数据库：给 domains 表添加 %s 列", column)
+                self._conn.execute(f"ALTER TABLE domains ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         with self._lock:
@@ -117,6 +150,8 @@ class Storage:
         years: int | None = None,
         note: str | None = None,
         source: str = "config",
+        group: str | None = None,
+        stop_after_first: bool = False,
     ) -> bool:
         """加入监控列表，返回 True 表示是新增（而不是更新）。"""
         now = iso(utcnow())
@@ -127,19 +162,24 @@ class Storage:
             if existing:
                 self._conn.execute(
                     """UPDATE domains
-                       SET max_price = COALESCE(?, max_price),
-                           years     = COALESCE(?, years),
-                           note      = COALESCE(?, note),
-                           enabled   = 1
+                       SET max_price        = COALESCE(?, max_price),
+                           years            = COALESCE(?, years),
+                           note             = COALESCE(?, note),
+                           group_name       = COALESCE(?, group_name),
+                           stop_after_first = ?,
+                           enabled          = 1
                      WHERE domain = ?""",
-                    (max_price, years, note, domain),
+                    (max_price, years, note, group, 1 if stop_after_first else 0, domain),
                 )
                 self._conn.commit()
                 return False
             self._conn.execute(
-                """INSERT INTO domains (domain, max_price, years, note, source, added_at, next_check_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (domain, max_price, years, note, source, now, now),
+                """INSERT INTO domains
+                   (domain, max_price, years, note, source, group_name, stop_after_first,
+                    added_at, next_check_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (domain, max_price, years, note, source, group,
+                 1 if stop_after_first else 0, now, now),
             )
             self._conn.commit()
             return True
@@ -197,6 +237,22 @@ class Storage:
             ).fetchone()
         return parse_datetime(row["next"]) if row and row["next"] else None
 
+    def group_siblings(self, domain: str) -> list[WatchedDomain]:
+        """取同一组里除自己之外、仍在监控的其它域名。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT group_name FROM domains WHERE domain = ?", (domain,)
+            ).fetchone()
+            if row is None or not row["group_name"]:
+                return []
+            rows = self._conn.execute(
+                """SELECT * FROM domains
+                    WHERE group_name = ? AND domain != ? AND enabled = 1
+                      AND state != 'acquired'""",
+                (row["group_name"], domain),
+            ).fetchall()
+        return [_row_to_domain(item) for item in rows]
+
     def update_domain(self, domain: str, **fields: Any) -> None:
         """按字段更新，datetime / list 自动序列化。"""
         if not fields:
@@ -243,6 +299,8 @@ class Storage:
                 years=entry.years,
                 note=entry.note,
                 source="config",
+                group=getattr(entry, "group", None),
+                stop_after_first=getattr(entry, "stop_after_first", False),
             ):
                 added.append(name)
 
@@ -424,6 +482,8 @@ def _row_to_domain(row: sqlite3.Row) -> WatchedDomain:
         years=row["years"],
         note=row["note"],
         source=row["source"] or "config",
+        group=row["group_name"] if "group_name" in keys else None,
+        stop_after_first=bool(row["stop_after_first"]) if "stop_after_first" in keys else False,
         enabled=bool(row["enabled"]),
         added_at=parse_datetime(row["added_at"]) or datetime.now(timezone.utc),
         acquired_at=parse_datetime(row["acquired_at"]),

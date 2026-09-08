@@ -196,3 +196,28 @@ def test_docs_clone_commands_specify_the_branch():
                 assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"
             elif "git clone" in line:
                 assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"
+
+
+def test_set_domains_does_not_eat_the_next_section():
+    """顶格注释是分段标志，改写 domains 段不能把下一段的文档一起删掉。"""
+    text = load_template()
+    assert "prefixes:" in text          # 模板里有这段（注释形式）
+
+    result = set_domains(text, ["a.com"])
+
+    assert "prefixes:" in result
+    assert "stop_after_first" in result
+    assert "pattern_limit" in yaml.safe_load(result)
+
+
+def test_block_edits_are_composable():
+    """连续做多次定点编辑，注释不该被一点点啃掉。"""
+    text = load_template()
+    result = set_domains(text, ["a.com"])
+    result = set_flag(result, "telegram", "enabled", "true")
+    result = set_domains(result, ["a.com", "b.com"])
+
+    data = yaml.safe_load(result)
+    assert data["domains"] == ["a.com", "b.com"]
+    assert data["telegram"]["enabled"] is True
+    assert result.count("#") >= text.count("#") - 6

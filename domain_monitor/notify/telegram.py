@@ -21,7 +21,14 @@ import httpx
 
 from ..config import TelegramConfig
 from ..models import DomainState
-from ..utils import escape_html, is_valid_domain, normalize_domain, truncate
+from ..utils import (
+    PatternError,
+    escape_html,
+    expand_pattern,
+    is_valid_domain,
+    normalize_domain,
+    truncate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -393,9 +400,8 @@ class TelegramBot:
         # 这既避免了从聊天里的网址/散句误提取域名，也让 token.io、apikey.com
         # 这类**合法但字面像密钥**的域名不会被下面的凭据检查拦掉。
         if tokens and len(tokens) <= 20 and all(_is_bare_domain(item) for item in tokens):
-            return await self.controller.cmd_add(
-                [normalize_domain(item) for item in tokens]
-            )
+            # 原样交给 cmd_add：花括号模式要由它来展开
+            return await self.controller.cmd_add(tokens)
 
         if _looks_like_secret(text):
             # 注意：绝不把可疑内容写进日志或回显到消息里
@@ -492,7 +498,9 @@ class TelegramBot:
 
 
 # 分隔符：空白 + 中英文常见标点（中文句号会被 IDNA 当成标签分隔符，必须单列）
-_SEPARATORS = re.compile(r"[\s,;:，、；：。]+")
+# 分隔符：空白 + 中英文常见标点。花括号里的逗号要留着，
+# 否则 mydream.{com,net} 会被切成两半。
+_SEPARATORS = re.compile(r"(?![^{]*\})[\s,;:，、；：。]+")
 
 # 常见的密钥字样。只在「整条消息不是域名清单」时才检查，
 # 所以 token.io / apikey.com 这类合法域名不会走到这里。
@@ -508,10 +516,19 @@ _NOT_BARE = ("://", "/", "?", "#", "@", ":")
 
 
 def _is_bare_domain(token: str) -> bool:
-    """是不是一个干净的域名（而不是网址、路径或随口一句话）。"""
+    """是不是一个干净的域名，或者一条能展开成域名的模式。
+
+    ``mydream.{com,net,io}`` 也算——直接发这种写法就能一次盯一批。
+    """
     if any(mark in token for mark in _NOT_BARE):
         return False
-    return is_valid_domain(normalize_domain(token))
+    try:
+        candidates = expand_pattern(token)
+    except PatternError:
+        return False
+    return bool(candidates) and all(
+        is_valid_domain(normalize_domain(item)) for item in candidates
+    )
 
 
 def _looks_like_secret(text: str) -> bool:

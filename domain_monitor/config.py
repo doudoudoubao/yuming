@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from .models import LifecycleProfile
-from .utils import expand_env, is_valid_domain, normalize_domain
+from .utils import (
+    PatternError,
+    expand_env,
+    expand_pattern,
+    is_valid_domain,
+    normalize_domain,
+)
 
 
 class ConfigError(Exception):
@@ -135,6 +141,23 @@ class DomainEntry:
     max_price: float | None = None
     years: int | None = None
     note: str | None = None
+    # 同一个前缀展开出来的域名归为一组；抢到组里任意一个之后
+    # 可以按 stop_after_first 把其余的撤下来
+    group: str | None = None
+    stop_after_first: bool = False
+
+
+@dataclass(slots=True)
+class PrefixEntry:
+    """一个前缀 × 一组后缀 = 一批要盯的域名。"""
+
+    name: str | list[str] = ""
+    tlds: list[str] = field(default_factory=list)
+    max_price: float | None = None
+    years: int | None = None
+    note: str | None = None
+    # 只要抢到其中一个就够了，抢到后把同组其余的撤下来
+    stop_after_first: bool = True
 
 
 @dataclass(slots=True)
@@ -152,6 +175,8 @@ class AppConfig:
     registrars: list[RegistrarConfig] = field(default_factory=list)
     lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
     domains: list[DomainEntry] = field(default_factory=list)
+    prefixes: list[PrefixEntry] = field(default_factory=list)
+    pattern_limit: int = 200
     path: str | None = None
 
     def resolve(self, filename: str) -> str:
@@ -274,7 +299,7 @@ def _build_registrars(data: Any) -> list[RegistrarConfig]:
     return entries
 
 
-def _build_domains(data: Any) -> list[DomainEntry]:
+def _build_domains(data: Any, *, limit: int = 200) -> list[DomainEntry]:
     entries: list[DomainEntry] = []
     seen: set[str] = set()
     for index, item in enumerate(data or []):
@@ -285,21 +310,88 @@ def _build_domains(data: Any) -> list[DomainEntry]:
         raw_name = item.get("name") or item.get("domain")
         if not raw_name:
             raise ConfigError(f"domains[{index}] 缺少 name 字段")
-        name = normalize_domain(str(raw_name))
-        if not is_valid_domain(name):
-            raise ConfigError(f"domains[{index}] 不是合法域名: {raw_name}")
-        if name in seen:
-            continue
-        seen.add(name)
-        entries.append(
-            DomainEntry(
-                name=name,
-                max_price=float(item["max_price"]) if item.get("max_price") is not None else None,
-                years=int(item["years"]) if item.get("years") is not None else None,
-                note=item.get("note"),
+
+        # 支持 mydream.{com,net,io} 这种写法
+        try:
+            candidates = expand_pattern(str(raw_name), limit=limit)
+        except PatternError as exc:
+            raise ConfigError(f"domains[{index}]: {exc}") from exc
+        group = f"pattern:{raw_name}" if len(candidates) > 1 else None
+
+        for candidate in candidates:
+            name = normalize_domain(candidate)
+            if not is_valid_domain(name):
+                raise ConfigError(f"domains[{index}] 不是合法域名: {candidate}")
+            if name in seen:
+                continue
+            seen.add(name)
+            entries.append(
+                DomainEntry(
+                    name=name,
+                    max_price=float(item["max_price"]) if item.get("max_price") is not None else None,
+                    years=int(item["years"]) if item.get("years") is not None else None,
+                    note=item.get("note"),
+                    group=group,
+                    stop_after_first=bool(item.get("stop_after_first", False)),
+                )
             )
-        )
     return entries
+
+
+def _build_prefixes(data: Any, *, limit: int = 200) -> tuple[list[PrefixEntry], list[DomainEntry]]:
+    """解析 ``prefixes:`` 段，并展开成具体的监控条目。"""
+    if data is None:
+        return [], []
+    if not isinstance(data, list):
+        raise ConfigError("prefixes 必须是列表(list)")
+
+    prefixes: list[PrefixEntry] = []
+    entries: list[DomainEntry] = []
+    seen: set[str] = set()
+
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ConfigError(f"prefixes[{index}] 必须是映射(mapping)")
+        entry = _build(PrefixEntry, item, f"prefixes[{index}]")
+
+        names = entry.name if isinstance(entry.name, list) else [entry.name]
+        names = [str(n).strip().lower() for n in names if str(n).strip()]
+        if not names:
+            raise ConfigError(f"prefixes[{index}] 缺少 name（前缀）")
+        if not entry.tlds:
+            raise ConfigError(f"prefixes[{index}] 缺少 tlds（要盯哪些后缀）")
+
+        tlds = [str(t).strip().lower().lstrip(".") for t in entry.tlds]
+        tlds = [t for t in tlds if t]
+        total = len(names) * len(tlds)
+        if total > limit:
+            raise ConfigError(
+                f"prefixes[{index}] 会展开出 {total} 个域名，超过上限 {limit}，请拆小一点"
+            )
+
+        for prefix in names:
+            group = f"prefix:{prefix}"
+            for tld in tlds:
+                name = normalize_domain(f"{prefix}.{tld}")
+                if not is_valid_domain(name):
+                    raise ConfigError(
+                        f"prefixes[{index}] 组合出的不是合法域名: {prefix}.{tld}"
+                    )
+                if name in seen:
+                    continue
+                seen.add(name)
+                entries.append(
+                    DomainEntry(
+                        name=name,
+                        max_price=entry.max_price,
+                        years=entry.years,
+                        note=entry.note,
+                        group=group,
+                        stop_after_first=entry.stop_after_first,
+                    )
+                )
+        prefixes.append(entry)
+    return prefixes, entries
 
 
 def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None = None) -> AppConfig:
@@ -320,7 +412,8 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
         data = loaded
 
     data = expand_env(copy.deepcopy(data))
-    known_top = {item.name for item in fields(AppConfig)} - {"path"}
+    known_top = {item.name for item in fields(AppConfig)} - {"path", "prefixes"}
+    known_top.add("prefixes")
     unknown = set(data) - known_top
     if unknown:
         raise ConfigError(f"顶层存在未知配置项: {', '.join(sorted(unknown))}")
@@ -338,9 +431,17 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
         registrar=_build(RegistrarConfig, data.get("registrar"), "registrar"),
         registrars=_build_registrars(data.get("registrars")),
         lifecycle=_build_lifecycle(data.get("lifecycle")),
-        domains=_build_domains(data.get("domains")),
+        domains=[],
+        pattern_limit=int(data.get("pattern_limit", 200)),
         path=str(path) if path else None,
     )
+
+    # 域名和前缀都可能展开成多条，统一在这里做，共用同一个上限
+    limit = config.pattern_limit
+    config.domains = _build_domains(data.get("domains"), limit=limit)
+    config.prefixes, prefix_entries = _build_prefixes(data.get("prefixes"), limit=limit)
+    known = {item.name for item in config.domains}
+    config.domains.extend(item for item in prefix_entries if item.name not in known)
 
     for section, name in (
         (config.poll, "poll"),

@@ -140,6 +140,8 @@ class WatchedDomain:
     years: int | None = None
     note: str | None = None
     source: str = "config"
+    group: str | None = None
+    stop_after_first: bool = False
     enabled: bool = True
     added_at: datetime = field(default_factory=utcnow)
     acquired_at: datetime | None = None

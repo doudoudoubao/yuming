@@ -958,3 +958,77 @@ async def test_expired_domain_skips_reverification(rdap_server, storage):
     await engine.run_once()
 
     assert storage.get_domain("target.com").state is DomainState.ACQUIRED
+
+
+# ---------------------------------------------------------------- 前缀分组
+
+async def test_acquiring_one_retires_the_group(rdap_server, storage):
+    """「这个名字我要，哪个后缀都行」——拿到一个就别再盯其余的了。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "attempt_interval": 0,
+                  "attempt_concurrency": 1},
+    )
+    for tld in ("com", "net", "io"):
+        storage.upsert_domain(f"short.{tld}", group="prefix:short", stop_after_first=True)
+    rdap_server.set("short.com", rdap_payload())
+    rdap_server.set("short.net", rdap_payload())
+    rdap_server.set("short.io", None)          # 只有 .io 可注册
+
+    await engine.run_once()
+
+    assert storage.get_domain("short.io").state is DomainState.ACQUIRED
+    assert storage.get_domain("short.com").enabled is False
+    assert storage.get_domain("short.net").enabled is False
+    assert "group_retired" in [event.kind for event in storage.recent_events(20)]
+
+
+async def test_group_without_stop_after_first_keeps_watching(rdap_server, storage):
+    """没开 stop_after_first 就是「每个都想要」，不该被撤掉。"""
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "attempt_interval": 0,
+                  "attempt_concurrency": 1},
+    )
+    for tld in ("com", "net"):
+        storage.upsert_domain(f"both.{tld}", group="pattern:both", stop_after_first=False)
+    rdap_server.set("both.com", None)
+    rdap_server.set("both.net", rdap_payload())
+
+    await engine.run_once()
+
+    assert storage.get_domain("both.com").state is DomainState.ACQUIRED
+    assert storage.get_domain("both.net").enabled is True      # 继续盯着
+
+
+async def test_ungrouped_acquisition_touches_nothing_else(rdap_server, storage):
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True, "attempt_interval": 0,
+                  "attempt_concurrency": 1},
+    )
+    storage.upsert_domain("alone.com")
+    storage.upsert_domain("other.com")
+    rdap_server.set("alone.com", None)
+    rdap_server.set("other.com", rdap_payload())
+
+    await engine.run_once()
+
+    assert storage.get_domain("other.com").enabled is True
+
+
+async def test_cmd_add_expands_patterns(rdap_server, storage):
+    engine = build_engine(rdap_server, storage)
+
+    reply = await engine.cmd_add(["mydream.{com,net,io}"])
+
+    assert "mydream.com" in reply and "mydream.io" in reply
+    assert {item.domain for item in storage.list_domains()} == {
+        "mydream.com", "mydream.net", "mydream.io"
+    }
+
+
+async def test_cmd_add_rejects_malformed_pattern(rdap_server, storage):
+    engine = build_engine(rdap_server, storage)
+    assert "花括号" in await engine.cmd_add(["a.{com"])
+    assert storage.list_domains() == []

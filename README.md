@@ -16,6 +16,7 @@
 - **释放瞬间抢注** — 并发 + 重试下单，抢到立刻通知
 - **Telegram 双向控制** — 直接发域名即可加监控，另有 `/list` `/buy` `/pause` 等命令
 - **误报防护** — 查询失败绝不当可注册；可疑的状态跳变会自动复核后再行动
+- **前缀监控** — 一个名字盯多个后缀（`mydream.{com,net,io}`），抢到任意一个就收工
 - **7 个注册商适配器** — NameSilo / Dynadot / GoDaddy / Namecheap / 阿里云 / 演练模式 / 任意外部脚本
 - **多通道比价 + 并发抢** — 下单前并发问每家要价挑最便宜的；冲刺时同时向多家下单提高命中率
 - **一堆防误操作的闸门** — 价格上限、每日预算、演练模式、TG 二次确认（详见[安全闸门](#安全闸门)）
@@ -91,6 +92,54 @@ gTLD 的标准删除流程（ICANN 到期恢复政策）：
 3. **只知道到期时间** → 到期 + 80 天（很粗，只用来决定什么时候开始盯紧）
 
 各 TLD 的周期不一样，可以在 `lifecycle.tlds` 里单独配。
+
+---
+
+## 前缀监控：一个名字，多个后缀
+
+「这个名字我要，哪个后缀都行」是很常见的需求。两种写法：
+
+### 花括号模式（哪里都能用）
+
+```yaml
+domains:
+  - mydream.{com,net,io}      # 等同于写三行
+  - "{short,tiny}.com"        # 两个前缀
+```
+
+Telegram 里直接发也行，命令行同理：
+
+```
+你：  mydream.{com,net,io}
+机器人：✅ 已加入监控：mydream.com / mydream.net / mydream.io
+```
+
+```bash
+python -m domain_monitor check "mydream.{com,net,io}"
+```
+
+### `prefixes:` 配置段（可以设共享参数）
+
+```yaml
+prefixes:
+  - name: mydream                # 也能写成列表 [mydream, dreamy]
+    tlds: [com, net, io, cn]
+    max_price: 80                # 整组共用的价格上限
+    stop_after_first: true       # 抢到任意一个就收工（默认）
+```
+
+**`stop_after_first` 是这个功能的重点**：同一个前缀展开出来的域名算作一组，
+抢到组里任意一个之后，其余的会自动停止监控并推送一条通知：
+
+```
+🧹 已拿到 mydream.io，同组另外 3 个已停止监控：
+mydream.com、mydream.net、mydream.cn
+```
+
+如果你是**每个后缀都想要**（比如做品牌保护），把它设成 `false`。
+
+> 注意展开数量。`{a,b,c}.{com,net,io,cn}` 就是 12 个域名，每个都要走 RDAP 轮询。
+> 超过 `pattern_limit`（默认 200）会直接报错，防止一个手滑的模式把配额打爆。
 
 ---
 
@@ -529,7 +578,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 278 个测试，全部离线，约 8 秒
+.venv/bin/python -m pytest              # 333 个测试，全部离线，约 9 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

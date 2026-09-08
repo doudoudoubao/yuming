@@ -17,6 +17,8 @@ from .registrars import available_providers
 from .utils import (
     human_until,
     is_valid_domain,
+    PatternError,
+    expand_patterns,
     load_dotenv,
     normalize_domain,
     pad,
@@ -111,6 +113,11 @@ async def cmd_once(config: AppConfig) -> int:
 
 async def cmd_check(config: AppConfig, domains: list[str]) -> int:
     exit_code = 0
+    try:
+        domains = expand_patterns(domains, limit=config.pattern_limit)
+    except PatternError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 2
     async with Application(config) as app:
         for raw in domains:
             name = normalize_domain(raw)

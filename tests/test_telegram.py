@@ -488,3 +488,38 @@ async def test_silent_idle_off_notifies_everything():
     await notifier.state_changed("a.com", DomainState.REGISTERED, DomainState.EXPIRED)
 
     assert recorder.sent[0]["disable_notification"] is False
+
+
+async def test_plain_pattern_is_expanded():
+    """直接发 mydream.{com,net,io} 就能一次盯一批。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("mydream.{com,net,io}"))
+
+    assert controller.calls == [("add", ("mydream.{com,net,io}",))]
+
+
+async def test_pattern_commas_are_not_split_as_separators():
+    """花括号里的逗号不能被当成分隔符切开。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("a.{com,net} b.io"))
+
+    assert controller.calls == [("add", ("a.{com,net}", "b.io"))]
+
+
+async def test_malformed_pattern_is_not_treated_as_domain():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("a.{com"))
+
+    assert controller.calls == []
