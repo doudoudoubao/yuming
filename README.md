@@ -29,13 +29,10 @@
 抢注要在域名释放那一刻在线。
 
 ```bash
-git clone -b claude/domain-monitor-auto-register-5z21z6 \
-  https://github.com/doudoudoubao/yuming.git
+git clone https://github.com/doudoudoubao/yuming.git
 cd yuming
 ./install.sh
 ```
-
-> `-b` 那个分支名别漏掉——代码目前在这个分支上，`main` 分支只有一个 README。
 
 脚本会问你要监控哪些域名、Telegram token（都能跳过），然后自动建虚拟环境、
 装依赖、生成配置、跑自检。装完直接能用：

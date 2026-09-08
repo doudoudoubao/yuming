@@ -184,18 +184,23 @@ def test_install_script_rejects_incomplete_checkout(tmp_path):
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "不是完整的项目" in combined
-    assert "git clone -b" in combined          # 给出可直接照做的命令
+    assert "git clone https://" in combined     # 给出可直接照做的命令
 
 
-def test_docs_clone_commands_specify_the_branch():
-    """main 分支只有一个 README，文档里的 clone 命令必须带 -b。"""
+def test_docs_clone_commands_are_plain():
+    """代码已在默认分支上，文档里的 clone 命令不该再要求指定分支。"""
     for name in ("README.md", "docs/安装.md"):
         text = (REPO / name).read_text(encoding="utf-8")
         for line in text.splitlines():
-            if "git clone" in line and "yuming.git" in line:
-                assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"
-            elif "git clone" in line:
-                assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"
+            if "git clone" in line:
+                assert "-b " not in line, f"{name} 的 clone 命令还带着分支: {line}"
+
+
+def test_no_stale_branch_references():
+    """合并进默认分支之后，不该再有残留的功能分支名。"""
+    for name in ("README.md", "docs/安装.md", "install.sh"):
+        text = (REPO / name).read_text(encoding="utf-8")
+        assert "claude/domain-monitor-auto-register" not in text, f"{name} 里还留着分支名"
 
 
 def test_set_domains_does_not_eat_the_next_section():
