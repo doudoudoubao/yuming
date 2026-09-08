@@ -165,3 +165,109 @@ def test_group_siblings_excludes_disabled_and_acquired():
 
     assert store.group_siblings("a.com") == []
     store.close()
+
+
+# ------------------------------------------------------------------ 后缀合集
+
+def test_builtin_groups_expand():
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS, merge_groups
+
+    groups = merge_groups(None)
+    result = expand_pattern("vps.{@two}", groups=groups)
+    assert len(result) == len(BUILTIN_TLD_GROUPS["two"])
+    assert "vps.io" in result and "vps.ai" in result
+
+
+def test_two_letter_group_is_all_two_letter():
+    """@two 顾名思义，里面必须都是两位后缀。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS
+
+    for tld in BUILTIN_TLD_GROUPS["two"]:
+        assert len(tld) == 2, f"{tld} 不是两位"
+    for tld in BUILTIN_TLD_GROUPS["two-more"]:
+        assert len(tld) == 2, f"{tld} 不是两位"
+
+
+def test_groups_and_literals_can_mix():
+    from domain_monitor.tldgroups import merge_groups
+
+    result = expand_pattern("vps.{@classic,ai,io}", groups=merge_groups(None))
+    assert result == ["vps.com", "vps.net", "vps.org", "vps.ai", "vps.io"]
+
+
+def test_overlapping_groups_dedupe():
+    from domain_monitor.tldgroups import merge_groups
+
+    # @two 和 @startup 都含 io/co/ai，不该重复
+    result = expand_pattern("x.{@two,@startup}", groups=merge_groups(None))
+    assert len(result) == len(set(result))
+
+
+def test_unknown_group_gives_helpful_error():
+    from domain_monitor.tldgroups import merge_groups
+
+    with pytest.raises(PatternError, match="没有名为 @nosuch"):
+        expand_pattern("x.{@nosuch}", groups=merge_groups(None))
+
+
+def test_group_expansion_respects_limit():
+    from domain_monitor.tldgroups import merge_groups
+
+    with pytest.raises(PatternError, match="超过"):
+        expand_pattern("x.{@two-more}", groups=merge_groups(None), limit=10)
+
+
+def test_custom_groups_override_builtins():
+    config = load_config(
+        data={"tld_groups": {"two": ["io", "co"]}, "domains": ["x.{@two}"]}
+    )
+    assert [item.name for item in config.domains] == ["x.io", "x.co"]
+
+
+def test_custom_group_alongside_builtins():
+    config = load_config(
+        data={"tld_groups": {"我的": ["com", "io"]}, "domains": ["x.{@我的}", "y.{@classic}"]}
+    )
+    names = [item.name for item in config.domains]
+    assert names[:2] == ["x.com", "x.io"]
+    assert "y.org" in names
+
+
+def test_prefixes_tlds_accept_groups():
+    config = load_config(
+        data={"prefixes": [{"name": "host", "tlds": ["@classic", "io"]}]}
+    )
+    assert [item.name for item in config.domains] == [
+        "host.com", "host.net", "host.org", "host.io"
+    ]
+
+
+def test_prefixes_unknown_group_rejected():
+    with pytest.raises(ConfigError, match="不存在的后缀合集"):
+        load_config(data={"prefixes": [{"name": "x", "tlds": ["@nope"]}]})
+
+
+def test_prefixes_group_dedupes_with_literals():
+    config = load_config(data={"prefixes": [{"name": "x", "tlds": ["@classic", "com"]}]})
+    names = [item.name for item in config.domains]
+    assert names.count("x.com") == 1
+
+
+def test_every_group_entry_forms_a_valid_domain():
+    """任何一个合集配上普通前缀都得能组成合法域名。"""
+    from domain_monitor.tldgroups import merge_groups
+    from domain_monitor.utils import is_valid_domain, normalize_domain
+
+    for name, tlds in merge_groups(None).items():
+        for tld in tlds:
+            candidate = normalize_domain(f"test.{tld}")
+            assert is_valid_domain(candidate), f"@{name} 里的 {tld} 组不出合法域名"
+
+
+def test_restricted_groups_are_flagged():
+    """有注册限制的组必须带说明，否则用户会白花时间。"""
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS, RESTRICTED_NOTES
+
+    for key in ("europe", "china", "two-more"):
+        assert key in BUILTIN_TLD_GROUPS
+        assert key in RESTRICTED_NOTES and RESTRICTED_NOTES[key]

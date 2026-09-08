@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import LifecycleProfile
+from .tldgroups import merge_groups
 from .utils import (
     PatternError,
     expand_env,
@@ -176,6 +177,7 @@ class AppConfig:
     lifecycle: LifecycleConfig = field(default_factory=LifecycleConfig)
     domains: list[DomainEntry] = field(default_factory=list)
     prefixes: list[PrefixEntry] = field(default_factory=list)
+    tld_groups: dict[str, list[str]] = field(default_factory=dict)
     pattern_limit: int = 200
     path: str | None = None
 
@@ -299,7 +301,9 @@ def _build_registrars(data: Any) -> list[RegistrarConfig]:
     return entries
 
 
-def _build_domains(data: Any, *, limit: int = 200) -> list[DomainEntry]:
+def _build_domains(
+    data: Any, *, limit: int = 200, groups: dict[str, list[str]] | None = None
+) -> list[DomainEntry]:
     entries: list[DomainEntry] = []
     seen: set[str] = set()
     for index, item in enumerate(data or []):
@@ -313,7 +317,7 @@ def _build_domains(data: Any, *, limit: int = 200) -> list[DomainEntry]:
 
         # 支持 mydream.{com,net,io} 这种写法
         try:
-            candidates = expand_pattern(str(raw_name), limit=limit)
+            candidates = expand_pattern(str(raw_name), limit=limit, groups=groups)
         except PatternError as exc:
             raise ConfigError(f"domains[{index}]: {exc}") from exc
         group = f"pattern:{raw_name}" if len(candidates) > 1 else None
@@ -338,7 +342,9 @@ def _build_domains(data: Any, *, limit: int = 200) -> list[DomainEntry]:
     return entries
 
 
-def _build_prefixes(data: Any, *, limit: int = 200) -> tuple[list[PrefixEntry], list[DomainEntry]]:
+def _build_prefixes(
+    data: Any, *, limit: int = 200, groups: dict[str, list[str]] | None = None
+) -> tuple[list[PrefixEntry], list[DomainEntry]]:
     """解析 ``prefixes:`` 段，并展开成具体的监控条目。"""
     if data is None:
         return [], []
@@ -361,8 +367,25 @@ def _build_prefixes(data: Any, *, limit: int = 200) -> tuple[list[PrefixEntry], 
         if not entry.tlds:
             raise ConfigError(f"prefixes[{index}] 缺少 tlds（要盯哪些后缀）")
 
-        tlds = [str(t).strip().lower().lstrip(".") for t in entry.tlds]
-        tlds = [t for t in tlds if t]
+        # tlds 里也能写 @组名，和具体后缀混写
+        tlds: list[str] = []
+        for raw in entry.tlds:
+            token = str(raw).strip().lower().lstrip(".")
+            if not token:
+                continue
+            if token.startswith("@"):
+                key = token[1:]
+                if key not in (groups or {}):
+                    available = "、".join(f"@{n}" for n in sorted(groups or {}))
+                    raise ConfigError(
+                        f"prefixes[{index}] 引用了不存在的后缀合集 {token}。"
+                        f"可用的有：{available}"
+                    )
+                tlds.extend((groups or {})[key])
+            else:
+                tlds.append(token)
+        seen_tld: set[str] = set()
+        tlds = [t for t in tlds if not (t in seen_tld or seen_tld.add(t))]
         total = len(names) * len(tlds)
         if total > limit:
             raise ConfigError(
@@ -414,6 +437,7 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
     data = expand_env(copy.deepcopy(data))
     known_top = {item.name for item in fields(AppConfig)} - {"path", "prefixes"}
     known_top.add("prefixes")
+    known_top.add("tld_groups")
     unknown = set(data) - known_top
     if unknown:
         raise ConfigError(f"顶层存在未知配置项: {', '.join(sorted(unknown))}")
@@ -433,13 +457,17 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
         lifecycle=_build_lifecycle(data.get("lifecycle")),
         domains=[],
         pattern_limit=int(data.get("pattern_limit", 200)),
+        tld_groups=merge_groups(data.get("tld_groups")),
         path=str(path) if path else None,
     )
 
     # 域名和前缀都可能展开成多条，统一在这里做，共用同一个上限
     limit = config.pattern_limit
-    config.domains = _build_domains(data.get("domains"), limit=limit)
-    config.prefixes, prefix_entries = _build_prefixes(data.get("prefixes"), limit=limit)
+    groups = config.tld_groups
+    config.domains = _build_domains(data.get("domains"), limit=limit, groups=groups)
+    config.prefixes, prefix_entries = _build_prefixes(
+        data.get("prefixes"), limit=limit, groups=groups
+    )
     known = {item.name for item in config.domains}
     config.domains.extend(item for item in prefix_entries if item.name not in known)
 

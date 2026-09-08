@@ -1032,3 +1032,29 @@ async def test_cmd_add_rejects_malformed_pattern(rdap_server, storage):
     engine = build_engine(rdap_server, storage)
     assert "花括号" in await engine.cmd_add(["a.{com"])
     assert storage.list_domains() == []
+
+
+async def test_cmd_add_expands_tld_groups(rdap_server, storage):
+    engine = build_engine(rdap_server, storage)
+
+    reply = await engine.cmd_add(["vps.{@classic}"])
+
+    assert "vps.com" in reply
+    assert {item.domain for item in storage.list_domains()} == {
+        "vps.com", "vps.net", "vps.org"
+    }
+
+
+async def test_cmd_tlds_lists_and_details(rdap_server, storage):
+    engine = build_engine(rdap_server, storage)
+
+    listing = await engine.cmd_tlds(None)
+    assert "@two" in listing and "@classic" in listing
+
+    detail = await engine.cmd_tlds("two")
+    assert "io" in detail and "14 个后缀" in detail
+
+    detail_at = await engine.cmd_tlds("@two")     # 带不带 @ 都认
+    assert "io" in detail_at
+
+    assert "没有" in await engine.cmd_tlds("nosuch")

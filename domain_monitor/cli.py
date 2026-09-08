@@ -14,6 +14,7 @@ from .app import Application
 from .config import AppConfig, ConfigError, load_config
 from .models import DomainState
 from .registrars import available_providers
+from .tldgroups import RESTRICTED_NOTES, group_names
 from .utils import (
     human_until,
     is_valid_domain,
@@ -114,7 +115,9 @@ async def cmd_once(config: AppConfig) -> int:
 async def cmd_check(config: AppConfig, domains: list[str]) -> int:
     exit_code = 0
     try:
-        domains = expand_patterns(domains, limit=config.pattern_limit)
+        domains = expand_patterns(
+            domains, limit=config.pattern_limit, groups=config.tld_groups
+        )
     except PatternError as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
@@ -275,6 +278,40 @@ async def cmd_list(config: AppConfig) -> int:
     return 0
 
 
+def cmd_tlds(config: AppConfig, name: str | None) -> int:
+    """列出后缀合集，或某个合集的具体内容。"""
+    groups = config.tld_groups
+    if name:
+        key = name.strip().lstrip("@").lower()
+        if key not in groups:
+            print(f"✗ 没有 @{key} 这个合集。不带参数运行可查看全部。", file=sys.stderr)
+            return 2
+        items = groups[key]
+        print(f"@{key}（{len(items)} 个后缀）")
+        print("  " + " ".join(items))
+        print(f"\n用法：你的前缀.{{@{key}}}")
+        note = RESTRICTED_NOTES.get(key)
+        if note:
+            print(f"⚠️  {note}")
+        return 0
+
+    print("可用的后缀合集：\n")
+    for key in group_names():
+        items = groups.get(key, [])
+        preview = " ".join(items[:8])
+        if len(items) > 8:
+            preview += f" … (共 {len(items)} 个)"
+        mark = " ⚠️" if key in RESTRICTED_NOTES else ""
+        print(f"  {pad('@' + key, 12)}{preview}{mark}")
+    print("\n用法：")
+    print("  domain_monitor add 'vps.{@two}'        一次加一批两位后缀")
+    print("  domain_monitor add 'vps.{@two,com}'    合集和具体后缀混写")
+    print("  domain_monitor tlds two                看某个合集的完整内容")
+    if any(key in RESTRICTED_NOTES for key in groups):
+        print("\n⚠️ 标记的组有注册限制，下单前先用 price 命令确认注册商是否支持。")
+    return 0
+
+
 async def cmd_log(config: AppConfig, limit: int) -> int:
     async with Application(config) as app:
         for event in reversed(app.storage.recent_events(limit)):
@@ -350,6 +387,9 @@ def build_parser() -> argparse.ArgumentParser:
     log = sub.add_parser("log", help="查看最近事件")
     log.add_argument("-n", "--limit", type=int, default=30)
 
+    tlds = sub.add_parser("tlds", help="查看预设的后缀合集")
+    tlds.add_argument("name", nargs="?", help="合集名，如 two")
+
     init = sub.add_parser("init", help="生成一份配置文件模板")
     init.add_argument("path", nargs="?", default="config.yaml")
 
@@ -384,6 +424,9 @@ def main(argv: list[str] | None = None) -> int:
         "rm": lambda: cmd_remove(config, args.domains),
         "log": lambda: cmd_log(config, args.limit),
     }
+    # 同步子命令单独处理，不用绕 asyncio
+    if command == "tlds":
+        return cmd_tlds(config, args.name)
     runner = runners.get(command)
     if runner is None:  # pragma: no cover - argparse 已经拦住了
         parser.print_help()

@@ -16,7 +16,7 @@
 - **释放瞬间抢注** — 并发 + 重试下单，抢到立刻通知
 - **Telegram 双向控制** — 直接发域名即可加监控，另有 `/list` `/buy` `/pause` 等命令
 - **误报防护** — 查询失败绝不当可注册；可疑的状态跳变会自动复核后再行动
-- **前缀监控** — 一个名字盯多个后缀（`mydream.{com,net,io}`），抢到任意一个就收工
+- **前缀监控** — 一个名字盯多个后缀，内置常见后缀合集（`vps.{@two}` 一次盯 14 个两位后缀），抢到任意一个就收工
 - **7 个注册商适配器** — NameSilo / Dynadot / GoDaddy / Namecheap / 阿里云 / 演练模式 / 任意外部脚本
 - **多通道比价 + 并发抢** — 下单前并发问每家要价挑最便宜的；冲刺时同时向多家下单提高命中率
 - **一堆防误操作的闸门** — 价格上限、每日预算、演练模式、TG 二次确认（详见[安全闸门](#安全闸门)）
@@ -99,17 +99,66 @@ gTLD 的标准删除流程（ICANN 到期恢复政策）：
 
 「这个名字我要，哪个后缀都行」是很常见的需求。两种写法：
 
+### 预设合集：`vps.{@two}`
+
+不想一个个列后缀，直接引用合集：
+
+```yaml
+domains:
+  - "vps.{@two}"              # 一次盯 14 个常见两位后缀
+  - "vps.{@two,com,net}"      # 合集和具体后缀混写
+```
+
+内置合集（`domain_monitor tlds` 可随时查看）：
+
+| 合集 | 内容 |
+|---|---|
+| `@two` | `io co ai me cc tv ly to sh gg im is la vc`（14 个两位后缀） |
+| `@two-more` | 上面 + 19 个小众岛国两位后缀（共 33 个）⚠️ |
+| `@classic` | `com net org` |
+| `@popular` | `com net org io co ai xyz app dev` |
+| `@startup` | `io ai dev app tech xyz co sh` |
+| `@europe` | `de fr it es nl se eu ch at dk be pl cz` ⚠️ |
+| `@china` | `cn com.cn net.cn` ⚠️ |
+
+别名：`@2` `@短` = `@two`，`@常用` = `@popular`。
+
+```bash
+domain_monitor tlds          # 列出全部合集
+domain_monitor tlds two      # 看 @two 的完整内容
+```
+
+Telegram 里发 `/tlds` 同样能查。
+
+> ⚠️ **合集只是书写便利，不是「保证能注册」的清单。** 各注册商支持的后缀不一样，
+> 带 ⚠️ 的组还有额外限制：欧洲国别域名多数要求当地实体或居民身份，`.cn` 需要实名。
+> 下单前用 `domain_monitor price` 确认你的注册商卖不卖、多少钱。
+
+自定义合集：
+
+```yaml
+tld_groups:
+  我的组: [com, io, ai, xyz]
+  便宜: [xyz, top, icu, shop]
+```
+
+写了和内置同名的组会覆盖内置的。
+
 ### 花括号模式（哪里都能用）
 
 ```yaml
 domains:
   - mydream.{com,net,io}      # 等同于写三行
   - "{short,tiny}.com"        # 两个前缀
+  - "{vps,host}.{@classic}"   # 前缀和后缀都能展开
 ```
 
 Telegram 里直接发也行，命令行同理：
 
 ```
+你：  vps.{@two}
+机器人：✅ 已加入监控：vps.io / vps.co / vps.ai / ...（14 个）
+
 你：  mydream.{com,net,io}
 机器人：✅ 已加入监控：mydream.com / mydream.net / mydream.io
 ```
@@ -123,7 +172,7 @@ python -m domain_monitor check "mydream.{com,net,io}"
 ```yaml
 prefixes:
   - name: mydream                # 也能写成列表 [mydream, dreamy]
-    tlds: [com, net, io, cn]
+    tlds: ["@two", com, net]       # tlds 里同样支持 @合集
     max_price: 80                # 整组共用的价格上限
     stop_after_first: true       # 抢到任意一个就收工（默认）
 ```
@@ -198,6 +247,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 | `/buy <域名>` | 立即尝试注册 |
 | `/pause` / `/resume` | 暂停 / 恢复自动抢注（仍继续监控） |
 | `/log [数量]` | 最近事件 |
+| `/tlds [合集名]` | 查看预设的后缀合集 |
 
 > 通过 `/add` 加的域名存在数据库里，**不会**被配置文件的同步覆盖掉；
 > 只有配置文件里删掉的域名才会被清理。
@@ -515,6 +565,7 @@ python -m domain_monitor [-c 配置文件] <子命令>
 | `price <域名>...` | 向注册商查价 |
 | `add` / `rm` / `list` | 管理监控列表 |
 | `log [-n 数量]` | 查看事件流 |
+| `tlds [合集名]` | 查看预设的后缀合集 |
 | `init [路径]` | 生成配置模板 |
 
 ```bash
@@ -560,6 +611,7 @@ TG_BOT_TOKEN=xxx TG_CHAT_ID=yyy docker compose up -d
 domain_monitor/
 ├── cli.py              命令行入口
 ├── config_edit.py      保留注释地修改 config.yaml（安装脚本用）
+├── tldgroups.py        预设后缀合集（@two / @classic ...）
 ├── app.py              组件装配 + 优雅退出
 ├── engine.py           调度、状态机、抢注（核心）
 ├── rdap.py             RDAP 客户端（bootstrap 缓存 + 限速 + 退避）
@@ -578,7 +630,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 333 个测试，全部离线，约 9 秒
+.venv/bin/python -m pytest              # 353 个测试，全部离线，约 9 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

@@ -33,6 +33,7 @@ from .rdap import RdapClient
 from .registrars.base import Registrar
 from .registrars.pool import RegistrarPool
 from .storage import Storage
+from .tldgroups import RESTRICTED_NOTES, group_names
 from .utils import (
     PatternError,
     apply_jitter,
@@ -920,7 +921,9 @@ class Engine:
     async def cmd_add(self, domains: list[str]) -> str:
         # 支持 mydream.{com,net,io} 这种一次加一批的写法
         try:
-            expanded = expand_patterns(domains, limit=self.config.pattern_limit)
+            expanded = expand_patterns(
+                domains, limit=self.config.pattern_limit, groups=self.config.tld_groups
+            )
         except PatternError as exc:
             return f"❌ {escape_html(exc)}"
 
@@ -948,6 +951,48 @@ class Engine:
         if invalid:
             lines.append("❌ 非法域名：" + "、".join(escape_html(item) for item in invalid))
         return "\n\n".join(lines) or "没有可添加的域名"
+
+    @property
+    def pattern_groups(self) -> dict[str, list[str]]:
+        """后缀合集，供 Telegram 侧做模式识别。"""
+        return self.config.tld_groups
+
+    async def cmd_tlds(self, name: str | None = None) -> str:
+        """列出可用的后缀合集，或某个合集的具体内容。"""
+        groups = self.config.tld_groups
+        if name:
+            key = name.strip().lstrip("@").lower()
+            if key not in groups:
+                return (
+                    f"没有 <code>@{escape_html(key)}</code> 这个合集。发 /tlds 看全部。"
+                )
+            items = groups[key]
+            note = RESTRICTED_NOTES.get(key)
+            lines = [
+                f"<b>@{escape_html(key)}</b>（{len(items)} 个后缀）",
+                f"<code>{escape_html(' '.join(items))}</code>",
+                "",
+                f"用法：<code>你的前缀.{{@{escape_html(key)}}}</code>",
+            ]
+            if note:
+                lines.append(f"\n⚠️ {escape_html(note)}")
+            return "\n".join(lines)
+
+        lines = ["<b>可用的后缀合集</b>", ""]
+        for key in group_names():
+            items = groups.get(key, [])
+            preview = "、".join(items[:6])
+            if len(items) > 6:
+                preview += f" …… 共 {len(items)} 个"
+            mark = " ⚠️" if key in RESTRICTED_NOTES else ""
+            lines.append(f"<code>@{key}</code>{mark} — {escape_html(preview)}")
+        lines += [
+            "",
+            "用法：<code>vps.{@two}</code> 一次盯一批",
+            "也能混写：<code>vps.{@two,com,net}</code>",
+            "发 <code>/tlds two</code> 看某个合集的完整内容",
+        ]
+        return "\n".join(lines)
 
     async def cmd_remove(self, domain: str) -> str:
         name = normalize_domain(domain)

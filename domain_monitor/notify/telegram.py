@@ -42,9 +42,11 @@ HELP_TEXT = """<b>域名监控机器人</b>
 /check &lt;域名&gt; — 立即查询一个域名
 /info &lt;域名&gt; — 查看某域名的详细信息
 /log [数量] — 最近事件
+/tlds [合集名] — 查看可用的后缀合集
 
 <b>管理</b>
 直接把域名发给我就能加入监控（不用打命令）
+支持批量写法：<code>vps.{@two}</code>（两位后缀合集）、<code>a.{com,net,io}</code>
 /add &lt;域名&gt; [域名2 ...] — 加入监控
 /del &lt;域名&gt; — 移出监控
 /pause — 暂停自动抢注（仍继续监控）
@@ -63,6 +65,7 @@ BOT_COMMANDS = [
     {"command": "buy", "description": "立即尝试注册"},
     {"command": "pause", "description": "暂停自动抢注"},
     {"command": "resume", "description": "恢复自动抢注"},
+    {"command": "tlds", "description": "查看后缀合集"},
     {"command": "log", "description": "最近事件"},
     {"command": "help", "description": "帮助"},
 ]
@@ -80,6 +83,7 @@ class Controller(Protocol):
     async def cmd_buy(self, domain: str) -> str: ...
     async def cmd_pause(self, paused: bool) -> str: ...
     async def cmd_log(self, limit: int) -> str: ...
+    async def cmd_tlds(self, name: str | None) -> str: ...
 
 
 class TelegramClient:
@@ -379,6 +383,8 @@ class TelegramBot:
             return await self.controller.cmd_pause(True)
         if command == "resume":
             return await self.controller.cmd_pause(False)
+        if command in ("tlds", "tld", "合集"):
+            return await self.controller.cmd_tlds(args[0] if args else None)
         if command == "log":
             limit = 15
             if args:
@@ -395,11 +401,14 @@ class TelegramBot:
         顺带拦一道凭据泄露——用户很容易顺手把 API Key 粘进聊天框，
         而抢注**从来不需要**通过 Telegram 传任何账号或密钥。
         """
+        groups = getattr(self.controller, "pattern_groups", None)
         tokens = [item for item in _SEPARATORS.split(text) if item]
         # 先按「域名清单」解析。全部是裸域名才自动加监控——
         # 这既避免了从聊天里的网址/散句误提取域名，也让 token.io、apikey.com
         # 这类**合法但字面像密钥**的域名不会被下面的凭据检查拦掉。
-        if tokens and len(tokens) <= 20 and all(_is_bare_domain(item) for item in tokens):
+        if tokens and len(tokens) <= 20 and all(
+            _is_bare_domain(item, groups) for item in tokens
+        ):
             # 原样交给 cmd_add：花括号模式要由它来展开
             return await self.controller.cmd_add(tokens)
 
@@ -414,7 +423,7 @@ class TelegramBot:
                 "并删除这条消息。"
             )
 
-        maybe = [item for item in tokens if _is_bare_domain(item)][:5]
+        maybe = [item for item in tokens if _is_bare_domain(item, groups)][:5]
         hint = (
             "没认出域名。直接把域名发给我就能加入监控（整条消息只放域名），例如：\n"
             "<code>example.com</code>\n"
@@ -513,17 +522,22 @@ _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")
 
 # 裸主机名：不能带协议、路径、查询串、端口或用户名
 _NOT_BARE = ("://", "/", "?", "#", "@", ":")
+_BRACES = re.compile(r"\{[^{}]*\}")
 
 
-def _is_bare_domain(token: str) -> bool:
+def _is_bare_domain(token: str, groups: dict[str, list[str]] | None = None) -> bool:
     """是不是一个干净的域名，或者一条能展开成域名的模式。
 
-    ``mydream.{com,net,io}`` 也算——直接发这种写法就能一次盯一批。
+    ``mydream.{com,net,io}`` 和 ``vps.{@two}`` 都算——
+    直接发这种写法就能一次盯一批。
     """
-    if any(mark in token for mark in _NOT_BARE):
+    # 禁用字符只在花括号**之外**判断：@ 在 user@example.com 里要挡，
+    # 但在 vps.{@two} 里是合集引用，不能一起误伤。
+    outside = _BRACES.sub("", token)
+    if any(mark in outside for mark in _NOT_BARE):
         return False
     try:
-        candidates = expand_pattern(token)
+        candidates = expand_pattern(token, groups=groups)
     except PatternError:
         return False
     return bool(candidates) and all(

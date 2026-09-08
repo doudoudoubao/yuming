@@ -192,11 +192,18 @@ _BRACE_RE = re.compile(r"\{([^{}]*)\}")
 DEFAULT_PATTERN_LIMIT = 200
 
 
-def expand_pattern(text: str, *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str]:
+def expand_pattern(
+    text: str,
+    *,
+    limit: int = DEFAULT_PATTERN_LIMIT,
+    groups: dict[str, list[str]] | None = None,
+) -> list[str]:
     """展开花括号写法，一个前缀盯多个后缀。
 
     ``mydream.{com,net,io}`` → ``mydream.com`` / ``mydream.net`` / ``mydream.io``
     ``{a,b}.{com,cn}``       → 四个组合
+    ``vps.{@two}``           → 展开成预设的两位后缀合集
+    ``vps.{@two,com,net}``   → 合集和具体后缀可以混写
 
     没有花括号就原样返回单元素列表，所以可以无脑套在任何接受域名的地方。
     展开结果做去重且保持书写顺序；超过 ``limit`` 直接报错，
@@ -210,13 +217,34 @@ def expand_pattern(text: str, *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str
     if text.count("{") != text.count("}"):
         raise PatternError(f"花括号没配对: {text}")
 
+    groups = groups or {}
+
     results = [text]
     while True:
         match = _BRACE_RE.search(results[0])
         if match is None:
             break
-        options = [item.strip() for item in match.group(1).split(",")]
-        options = [item for item in options if item]
+        options: list[str] = []
+        for raw in match.group(1).split(","):
+            item = raw.strip()
+            if not item:
+                continue
+            if item.startswith("@"):
+                key = item[1:].strip().lower()
+                if key not in groups:
+                    available = "、".join(f"@{name}" for name in sorted(groups)) or "（无）"
+                    raise PatternError(
+                        f"没有名为 @{key} 的后缀合集。可用的有：{available}"
+                    )
+                options.extend(groups[key])
+            else:
+                options.append(item)
+        # 合集之间可能有重叠（@two 和 @startup 都含 io），去重保序
+        seen_option: set[str] = set()
+        options = [
+            item for item in options
+            if not (item in seen_option or seen_option.add(item))
+        ]
         if not options:
             raise PatternError(f"花括号里是空的: {text}")
 
@@ -245,12 +273,17 @@ def expand_pattern(text: str, *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str
     return ordered
 
 
-def expand_patterns(items: Iterable[str], *, limit: int = DEFAULT_PATTERN_LIMIT) -> list[str]:
+def expand_patterns(
+    items: Iterable[str],
+    *,
+    limit: int = DEFAULT_PATTERN_LIMIT,
+    groups: dict[str, list[str]] | None = None,
+) -> list[str]:
     """批量展开，结果整体去重。"""
     seen: set[str] = set()
     ordered: list[str] = []
     for item in items:
-        for name in expand_pattern(item, limit=limit):
+        for name in expand_pattern(item, limit=limit, groups=groups):
             if name not in seen:
                 seen.add(name)
                 ordered.append(name)

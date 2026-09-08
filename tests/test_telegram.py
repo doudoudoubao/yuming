@@ -60,6 +60,7 @@ class StubController:
     async def cmd_buy(self, d): self.calls.append(("buy", d)); return "BUYING"
     async def cmd_pause(self, p): self.calls.append(("pause", p)); return "PAUSED"
     async def cmd_log(self, n): self.calls.append(("log", n)); return "LOG"
+    async def cmd_tlds(self, name): self.calls.append(("tlds", name)); return "TLDS"
 
 
 # ------------------------------------------------------------------- 客户端
@@ -523,3 +524,41 @@ async def test_malformed_pattern_is_not_treated_as_domain():
     await bot._dispatch(make_message("a.{com"))
 
     assert controller.calls == []
+
+
+async def test_group_pattern_is_accepted():
+    """vps.{@two} 要能被识别成域名模式，而不是被 @ 挡掉。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    controller.pattern_groups = {"two": ["io", "co", "ai"]}
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("vps.{@two}"))
+
+    assert controller.calls == [("add", ("vps.{@two}",))]
+
+
+async def test_at_sign_outside_braces_still_rejected():
+    """放宽 @ 不能把 user@example.com 这种一起放进来。"""
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    controller.pattern_groups = {"two": ["io"]}
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("user@example.com"))
+
+    assert controller.calls == []
+
+
+async def test_tlds_command_routes():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message("/tlds"))
+    await bot._dispatch(make_message("/tlds two"))
+
+    assert controller.calls == [("tlds", None), ("tlds", "two")]
