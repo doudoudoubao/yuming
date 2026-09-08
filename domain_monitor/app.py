@@ -10,7 +10,7 @@ from typing import Any
 from .config import AppConfig
 from .dnsprobe import DnsProbe
 from .engine import Engine
-from .models import DomainState
+from .models import DomainState, PurchaseMode
 from .notify.telegram import Notifier, NullBot, TelegramBot, TelegramClient
 from .rdap import RdapClient
 from .registrars import build_registrar
@@ -116,12 +116,13 @@ class Application:
 
     async def startup_notice(self) -> None:
         """启动时报个到，把「接下来会不会花钱」说清楚。"""
-        purchase = self.config.purchase
+        purchase = self.engine.purchase
+        current = self.engine.purchase_mode
         count = len(self.storage.list_domains(enabled_only=True))
 
-        if not purchase.enabled:
+        if current is PurchaseMode.MONITOR:
             mode = "🔍 仅监控，不会下单"
-        elif purchase.dry_run:
+        elif current is PurchaseMode.DRYRUN:
             mode = "🧪 演练模式，不会真的花钱"
         else:
             mode = (
@@ -141,7 +142,7 @@ class Application:
             f"🏬 通道 {'、'.join(self.pool.labels)}\n"
             f"{mode}\n\n"
             "发 /help 查看用法",
-            quiet=not (purchase.enabled and not purchase.dry_run),
+            quiet=not current.spends_money,
         )
 
     async def _warn_about_immediate_buys(self) -> None:
@@ -160,7 +161,7 @@ class Application:
         logger.warning(
             "⚠️ 真实下单已开启，有 %d 个域名上次检查时就是可注册状态，"
             "启动后会立刻尝试买下（受每日 %d 个上限约束）：%s",
-            len(already), self.config.purchase.max_per_day, preview,
+            len(already), self.engine.purchase.max_per_day, preview,
         )
         self.storage.add_event(
             "startup_pending_buys",
@@ -171,7 +172,7 @@ class Application:
             await self.notifier.send(
                 f"⚠️ <b>注意</b>：有 {len(already)} 个域名现在就是可注册状态，\n"
                 f"启动后会<b>立刻尝试买下</b>（每天最多 "
-                f"{self.config.purchase.max_per_day} 个）：\n"
+                f"{self.engine.purchase.max_per_day} 个）：\n"
                 f"<code>{preview}</code>\n\n"
                 f"不想买就先发 /pause"
             )

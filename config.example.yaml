@@ -101,8 +101,10 @@ telegram:
 
 # ---------------------------------------------------------------- 抢注行为
 purchase:
-  enabled: false            # ← 总开关。确认整条链路跑通后再改 true
+  enabled: false            # ← 总开关（这里给的是默认值，之后可在 TG 里用 /mode 切换）
   dry_run: true             # ← 演练开关。改 false 才会真的花钱！
+  allow_remote_control: true  # 允许在 Telegram 里用 /mode 切换下单模式？
+                            # 关掉的话配置文件是唯一权威，改模式必须登服务器
   years: 1
   max_price: 50             # 单个域名价格上限（超过就放弃，防溢价域名天价）
   daily_budget: 200         # 每日累计消费上限（金额）

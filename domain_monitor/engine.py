@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from .config import AppConfig
 from .dnsprobe import DnsProbe, ProbeResult
 from .models import (
+    MODE_ALIASES,
     DomainState,
+    PurchaseMode,
     DomainStatus,
     Phase,
     RegistrationResult,
@@ -55,6 +58,7 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 PAUSED_KEY = "purchase_paused"
+MODE_KEY = "purchase_mode"
 
 
 class Engine:
@@ -101,7 +105,40 @@ class Engine:
     def registrar(self, value: Registrar | RegistrarPool) -> None:
         self.pool = value if isinstance(value, RegistrarPool) else RegistrarPool([value])
 
-    # ------------------------------------------------------------------ 暂停开关
+    # ------------------------------------------------------------ 下单模式与暂停
+
+    @property
+    def purchase_mode(self) -> PurchaseMode:
+        """当前生效的下单模式。运行时覆盖优先，没有就按配置推导。"""
+        override = self.storage.get_kv(MODE_KEY)
+        try:
+            return PurchaseMode(override)
+        except ValueError:
+            pass
+        # 这里必须读**原始配置**：self.purchase 反过来依赖本方法，
+        # 用有效值会变成无限递归。
+        if not self.config.purchase.enabled:
+            return PurchaseMode.MONITOR
+        if self.config.purchase.dry_run:
+            return PurchaseMode.DRYRUN
+        return PurchaseMode.LIVE
+
+    def set_purchase_mode(self, mode: PurchaseMode) -> None:
+        self.storage.set_kv(MODE_KEY, mode.value)
+
+    @property
+    def purchase(self):
+        """把运行时模式叠加到配置上。
+
+        引擎内部一律用这个而不是 config.purchase，否则在 Telegram 里
+        切了模式，代码还在按配置文件的旧值走。
+        """
+        mode = self.purchase_mode
+        return replace(
+            self.config.purchase,
+            enabled=mode is not PurchaseMode.MONITOR,
+            dry_run=mode is not PurchaseMode.LIVE,
+        )
 
     @property
     def paused(self) -> bool:
@@ -121,9 +158,9 @@ class Engine:
             "引擎启动：%d 个域名，注册商=%s，下单=%s",
             len(self.storage.list_domains()),
             self.registrar.name,
-            "开启" if self.config.purchase.enabled else "关闭（仅监控）",
+            "开启" if self.purchase.enabled else "关闭（仅监控）",
         )
-        if self.config.purchase.enabled and self.config.purchase.dry_run:
+        if self.purchase.enabled and self.purchase.dry_run:
             logger.warning("purchase.dry_run=true —— 只演练不会真的下单")
 
         while not self._stop.is_set():
@@ -508,7 +545,7 @@ class Engine:
             self.storage.add_event("available", domain=domain, message=reason, level="warning")
             await self.notifier.available(domain, reason)
 
-        if not self.config.purchase.enabled:
+        if not self.purchase.enabled:
             logger.warning("%s 可注册，但没开启下单功能，仅通知", domain)
             return False
 
@@ -549,7 +586,7 @@ class Engine:
         抢注是毫秒级竞争，几美元的价差远不如抢到本身值钱。
         """
         domain = watched.domain
-        purchase = self.config.purchase
+        purchase = self.purchase
         price_limit = watched.max_price if watched.max_price is not None else purchase.max_price
         years = watched.years or purchase.years
 
@@ -630,7 +667,7 @@ class Engine:
     def auto_buy_allowed(self, watched: WatchedDomain) -> bool:
         """这个域名允许自动下单吗？域名自己的设置优先于全局默认。"""
         if watched.auto_buy is None:
-            return self.config.purchase.auto_buy_default
+            return self.purchase.auto_buy_default
         return watched.auto_buy
 
     def _reserve_purchase_slot(self) -> bool:
@@ -640,7 +677,7 @@ class Engine:
         大家都读到同一个旧计数，闸门形同虚设。
         """
         used = self.storage.acquisitions_today() + self._inflight_purchases
-        if used >= self.config.purchase.max_per_day:
+        if used >= self.purchase.max_per_day:
             return False
         self._inflight_purchases += 1
         return True
@@ -657,7 +694,7 @@ class Engine:
         返回 ``(价格, 币种)``；返回 ``None`` 表示报价超过上限、应当放弃下单。
         元组里价格为 ``None`` 表示查不到价——查不到不等于买不了，继续下单。
         """
-        purchase = self.config.purchase
+        purchase = self.purchase
         multi = len(self.pool.active) > 1 and purchase.compare_prices
 
         if not multi:
@@ -724,7 +761,7 @@ class Engine:
         self, domain: str, years: int, price_limit: float, reason: str
     ) -> RegistrationResult | None:
         """并发 + 重试地下单，直到成功 / 用尽次数 / 遇到硬错误。"""
-        purchase = self.config.purchase
+        purchase = self.purchase
         deadline = utcnow() + timedelta(seconds=purchase.attempt_window)
         attempts = 0
         last: RegistrationResult | None = None
@@ -776,7 +813,7 @@ class Engine:
         self, domain: str, years: int, remaining: int
     ) -> tuple[RegistrationResult | None, list[RegistrationResult]]:
         """打一轮下单。演练模式直接返回假成功，不碰任何注册商。"""
-        purchase = self.config.purchase
+        purchase = self.purchase
         if purchase.dry_run:
             logger.info("[dry-run] 假装为 %s 下单 %d 年", domain, years)
             fake = RegistrationResult(
@@ -813,7 +850,7 @@ class Engine:
 
     async def _on_acquired(self, result: RegistrationResult, attempts: int) -> RegistrationResult:
         """抢到了：落库、通知、按需摘除监控。"""
-        purchase = self.config.purchase
+        purchase = self.purchase
         self.storage.record_purchase(result, dry_run=purchase.dry_run)
         self.storage.update_domain(
             result.domain,
@@ -899,7 +936,7 @@ class Engine:
             flag = "" if item.enabled else "　已停"
             # 真会花钱的时候，把「哪些会自动买」标出来
             cart = ""
-            if self.config.purchase.enabled and item.enabled:
+            if self.purchase.enabled and item.enabled:
                 cart = "🛒" if self.auto_buy_allowed(item) else "🔕"
             lines.append(
                 f"{item.state.emoji}{cart} <code>{escape_html(display_domain(item.domain))}</code>"
@@ -911,19 +948,17 @@ class Engine:
 
     async def cmd_status(self) -> str:
         stats = self.storage.stats()
-        purchase = self.config.purchase
+        purchase = self.purchase
         uptime = human_delta((utcnow() - self.started_at).total_seconds())
         by_state = "、".join(
             f"{DomainState(key).label} {value}"
             for key, value in sorted(stats["by_state"].items())
         ) or "无"
 
-        if not purchase.enabled:
-            mode = "仅监控，不下单"
-        elif purchase.dry_run:
-            mode = "演练模式，不会真的花钱"
-        else:
-            mode = f"<b>真实下单</b>（单价上限 {purchase.max_price:.0f}）"
+        current = self.purchase_mode
+        mode = f"{current.label}"
+        if current is PurchaseMode.LIVE:
+            mode = f"<b>{mode}</b>（单价上限 {purchase.max_price:.0f}）"
         if self.paused:
             mode += "　⏸ 已暂停"
 
@@ -940,7 +975,7 @@ class Engine:
 
         lines += [
             "",
-            f"🛒 {mode}",
+            f"{current.emoji} {mode}",
             f"🏬 通道 {escape_html('、'.join(self.pool.labels))}",
         ]
         if stats["purchase_attempts"]:
@@ -1029,7 +1064,7 @@ class Engine:
             lines.append(f"同组　　　另有 {len(siblings)} 个{note}")
         if watched.note:
             lines.append(f"备注　　　{escape_html(watched.note)}")
-        if self.config.purchase.enabled:
+        if self.purchase.enabled:
             state = {True: "开", False: "关", None: "跟随全局"}[watched.auto_buy]
             actual = "会自动买" if self.auto_buy_allowed(watched) else "只通知"
             lines.append(f"自动下单　{state}（{actual}）")
@@ -1180,7 +1215,7 @@ class Engine:
         name = normalize_domain(domain)
         if not is_valid_domain(name):
             return f"❌ 不是合法域名：{escape_html(name)}"
-        if not self.config.purchase.enabled:
+        if not self.purchase.enabled:
             return "❌ purchase.enabled=false，未开启下单功能"
         if self.storage.get_domain(name) is None:
             self.storage.upsert_domain(name, source="telegram")
@@ -1192,7 +1227,7 @@ class Engine:
         asyncio.create_task(
             self._manual_buy(watched), name=f"manual-buy:{name}"
         )
-        mode = "演练" if self.config.purchase.dry_run else "真实下单"
+        mode = "演练" if self.purchase.dry_run else "真实下单"
         return f"🛒 已开始尝试注册 <code>{escape_html(name)}</code>（{mode}），结果会推送给你"
 
     async def _manual_buy(self, watched: WatchedDomain) -> None:
@@ -1209,6 +1244,91 @@ class Engine:
             await self.notifier.failed(watched.domain, f"手动下单异常：{exc}")
         finally:
             self._acquiring.discard(watched.domain)
+
+    async def cmd_mode(self, value: str | None, confirm: bool = False) -> str:
+        """查看或切换下单模式。"""
+        current = self.purchase_mode
+        purchase = self.purchase
+
+        if value is None:
+            lines = [
+                f"{current.emoji} 当前模式：<b>{current.label}</b>",
+                "",
+                {
+                    PurchaseMode.MONITOR: "只监控只推送，绝不下单。",
+                    PurchaseMode.DRYRUN: "走完整抢注流程，但不会产生真实订单。",
+                    PurchaseMode.LIVE: (
+                        f"<b>会真的花钱。</b>每天最多 {purchase.max_per_day} 个 · "
+                        f"单价上限 {purchase.max_price:.0f} · 日预算 {purchase.daily_budget:.0f}"
+                    ),
+                }[current],
+            ]
+            if self.paused:
+                lines.append("\n⏸ 另外，抢注当前处于暂停状态（/resume 恢复）")
+            if not self.config.purchase.allow_remote_control:
+                lines.append("\n🔒 已禁止远程切换，要改请登服务器修改配置文件")
+            else:
+                lines += [
+                    "",
+                    "<code>/mode 监控</code>　只看不买",
+                    "<code>/mode 演练</code>　走流程不花钱",
+                    "<code>/mode 真实</code>　开始真的下单",
+                ]
+            return "\n".join(lines)
+
+        if not self.config.purchase.allow_remote_control:
+            return (
+                "🔒 配置里禁止了远程切换下单模式。\n"
+                "要改请登录服务器修改 config.yaml 的 purchase 段。"
+            )
+
+        target = MODE_ALIASES.get(value.strip().lower())
+        if target is None:
+            return (
+                f"看不懂「{escape_html(value)}」。\n"
+                "可用：<code>监控</code> / <code>演练</code> / <code>真实</code>"
+            )
+        if target is current:
+            return f"{target.emoji} 已经是<b>{target.label}</b>模式了，没有改动"
+
+        # 切到真实下单要过两道额外的关
+        if target is PurchaseMode.LIVE:
+            fake = [item.label for item in self.pool if item.name == "dryrun"]
+            if fake:
+                return (
+                    "❌ 当前注册商是 <code>dryrun</code> 演练适配器，切成真实下单没有意义"
+                    "（下不了单，只会让你误以为在抢）。\n"
+                    "请先在服务器上配置真实的注册商。"
+                )
+            if not confirm:
+                return (
+                    "⚠️ <b>确认要开启真实下单吗？</b>\n\n"
+                    f"开启后，监控列表里任何一个变成可注册的域名都会被下单，\n"
+                    f"包括现在就已经空着的那些。\n\n"
+                    f"每天最多 {purchase.max_per_day} 个 · "
+                    f"单价上限 {purchase.max_price:.0f} · "
+                    f"日预算 {purchase.daily_budget:.0f}\n"
+                    f"注册商：<code>{escape_html('、'.join(self.pool.labels))}</code>\n\n"
+                    "确认请发：<code>/mode 真实 确认</code>"
+                )
+
+        self.set_purchase_mode(target)
+        self.storage.add_event(
+            "mode_changed",
+            message=f"下单模式：{current.label} → {target.label}",
+            level="warning" if target.spends_money else "info",
+        )
+        logger.warning("下单模式已切换：%s → %s", current.label, target.label)
+
+        reply = f"{target.emoji} 已切换到<b>{target.label}</b>模式"
+        if target is PurchaseMode.LIVE:
+            reply += (
+                "\n\n💸 <b>从现在起会真的花钱。</b>\n"
+                "想立刻刹车发 /pause，想退回演练发 <code>/mode 演练</code>"
+            )
+        elif current is PurchaseMode.LIVE:
+            reply += "\n\n✅ 已停止真实下单"
+        return reply
 
     async def cmd_pause(self, paused: bool) -> str:
         self.set_paused(paused)

@@ -1296,3 +1296,134 @@ async def test_list_has_no_cart_markers_when_purchasing_is_off(rdap_server, stor
     listing = await engine.cmd_list()
 
     assert "🛒" not in listing and "🔕" not in listing
+
+
+# ------------------------------------------------------------ 下单模式切换
+
+async def test_mode_defaults_follow_config(rdap_server, storage):
+    from domain_monitor.models import PurchaseMode
+
+    monitor = build_engine(rdap_server, storage, purchase={"enabled": False})
+    assert monitor.purchase_mode is PurchaseMode.MONITOR
+
+    dry = build_engine(rdap_server, storage,
+                       purchase={"enabled": True, "dry_run": True})
+    assert dry.purchase_mode is PurchaseMode.DRYRUN
+
+
+async def test_mode_switch_changes_effective_settings(rdap_server, storage):
+    """切了模式，引擎实际用的值要跟着变——不能还按配置文件的旧值走。"""
+    from domain_monitor.models import PurchaseMode
+
+    engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+    assert engine.purchase.enabled is False
+
+    engine.set_purchase_mode(PurchaseMode.DRYRUN)
+    assert engine.purchase.enabled is True and engine.purchase.dry_run is True
+
+    engine.set_purchase_mode(PurchaseMode.LIVE)
+    assert engine.purchase.enabled is True and engine.purchase.dry_run is False
+
+    engine.set_purchase_mode(PurchaseMode.MONITOR)
+    assert engine.purchase.enabled is False
+
+
+async def test_mode_override_survives_restart(rdap_server, storage):
+    """模式存在数据库里，重启后不该悄悄退回配置文件的值。"""
+    from domain_monitor.models import PurchaseMode
+
+    first = build_engine(rdap_server, storage, purchase={"enabled": False})
+    first.set_purchase_mode(PurchaseMode.DRYRUN)
+
+    second = build_engine(rdap_server, storage, purchase={"enabled": False})
+    assert second.purchase_mode is PurchaseMode.DRYRUN
+
+
+async def test_switching_to_live_requires_confirmation(rdap_server, storage):
+    from domain_monitor.models import PurchaseMode
+    from tests.test_pool import FakeRegistrar
+
+    engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+    attach_pool(engine, FakeRegistrar("namesilo"))
+
+    reply = await engine.cmd_mode("真实")
+    assert "确认" in reply
+    assert engine.purchase_mode is PurchaseMode.MONITOR      # 没确认就没生效
+
+    reply = await engine.cmd_mode("真实", confirm=True)
+    assert engine.purchase_mode is PurchaseMode.LIVE
+    assert "会真的花钱" in reply
+
+
+async def test_cannot_go_live_with_a_fake_registrar(rdap_server, storage):
+    """注册商是演练适配器时切「真实」只会造成自欺，必须拦下。"""
+    from domain_monitor.models import PurchaseMode
+
+    engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+
+    reply = await engine.cmd_mode("真实", confirm=True)
+
+    assert "dryrun" in reply
+    assert engine.purchase_mode is PurchaseMode.MONITOR
+
+
+async def test_remote_control_can_be_locked_down(rdap_server, storage):
+    """服务器上关掉远程控制后，Telegram 不能改模式。"""
+    from domain_monitor.models import PurchaseMode
+    from tests.test_pool import FakeRegistrar
+
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": False, "allow_remote_control": False},
+    )
+    attach_pool(engine, FakeRegistrar("namesilo"))
+
+    reply = await engine.cmd_mode("真实", confirm=True)
+
+    assert "禁止" in reply
+    assert engine.purchase_mode is PurchaseMode.MONITOR
+    assert "登录服务器" in reply or "登服务器" in reply
+
+
+@pytest.mark.parametrize(
+    "word,expected",
+    [("监控", "MONITOR"), ("关闭", "MONITOR"), ("off", "MONITOR"),
+     ("演练", "DRYRUN"), ("dryrun", "DRYRUN"), ("测试", "DRYRUN")],
+)
+async def test_mode_aliases(rdap_server, storage, word, expected):
+    from domain_monitor.models import PurchaseMode
+
+    engine = build_engine(rdap_server, storage,
+                          purchase={"enabled": True, "dry_run": False})
+    await engine.cmd_mode(word)
+    assert engine.purchase_mode is getattr(PurchaseMode, expected)
+
+
+async def test_mode_rejects_gibberish(rdap_server, storage):
+    from domain_monitor.models import PurchaseMode
+
+    engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+    reply = await engine.cmd_mode("随便写的")
+    assert "看不懂" in reply
+    assert engine.purchase_mode is PurchaseMode.MONITOR
+
+
+async def test_mode_switch_actually_stops_buying(rdap_server, storage):
+    """从演练切回仅监控之后，真的不该再下单。"""
+    from domain_monitor.models import PurchaseMode
+
+    engine = build_engine(
+        rdap_server, storage,
+        purchase={"enabled": True, "dry_run": True,
+                  "attempt_interval": 0, "attempt_concurrency": 1},
+    )
+    storage.upsert_domain("a.com")
+    rdap_server.set("a.com", None)
+    await engine.run_once()
+    assert storage.get_domain("a.com").state is DomainState.ACQUIRED
+
+    engine.set_purchase_mode(PurchaseMode.MONITOR)
+    storage.upsert_domain("b.com")
+    rdap_server.set("b.com", None)
+    await engine.run_once()
+    assert storage.get_domain("b.com").state is DomainState.AVAILABLE     # 只通知

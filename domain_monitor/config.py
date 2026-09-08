@@ -108,6 +108,9 @@ class PurchaseConfig:
     # 没有单独标 auto_buy 的域名，默认自动下单吗？
     # 设成 false 就变成「白名单模式」：只有显式写了 auto_buy: true 的才会被买。
     auto_buy_default: bool = True
+    # 允许在 Telegram 里切换下单模式吗？关掉的话配置文件是唯一权威，
+    # 想改必须登服务器——适合「机器人只读」的用法。
+    allow_remote_control: bool = True
     currency: str = "USD"
     max_attempts: int = 120           # 单个域名单次冲刺的最大下单次数
     attempt_interval: float = 0.5     # 两次下单之间的间隔

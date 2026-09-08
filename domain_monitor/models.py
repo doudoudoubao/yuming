@@ -64,6 +64,51 @@ _STATE_EMOJI = {
 }
 
 
+class PurchaseMode(str, Enum):
+    """下单模式。配置给出默认值，运行时可以在 Telegram 里切换。"""
+
+    MONITOR = "monitor"   # 只监控只推送，绝不下单
+    DRYRUN = "dryrun"     # 走完整流程但不产生真实订单
+    LIVE = "live"         # 真的花钱
+
+    @property
+    def label(self) -> str:
+        return _MODE_LABELS[self]
+
+    @property
+    def emoji(self) -> str:
+        return _MODE_EMOJI[self]
+
+    @property
+    def spends_money(self) -> bool:
+        return self is PurchaseMode.LIVE
+
+
+_MODE_LABELS = {
+    PurchaseMode.MONITOR: "仅监控",
+    PurchaseMode.DRYRUN: "演练",
+    PurchaseMode.LIVE: "真实下单",
+}
+
+_MODE_EMOJI = {
+    PurchaseMode.MONITOR: "🔍",
+    PurchaseMode.DRYRUN: "🧪",
+    PurchaseMode.LIVE: "💸",
+}
+
+# 用户可能怎么称呼这几种模式
+MODE_ALIASES = {
+    "monitor": PurchaseMode.MONITOR, "仅监控": PurchaseMode.MONITOR,
+    "监控": PurchaseMode.MONITOR, "off": PurchaseMode.MONITOR,
+    "关": PurchaseMode.MONITOR, "关闭": PurchaseMode.MONITOR,
+    "dryrun": PurchaseMode.DRYRUN, "dry-run": PurchaseMode.DRYRUN,
+    "演练": PurchaseMode.DRYRUN, "测试": PurchaseMode.DRYRUN,
+    "live": PurchaseMode.LIVE, "真实": PurchaseMode.LIVE,
+    "真实下单": PurchaseMode.LIVE, "开": PurchaseMode.LIVE,
+    "开启": PurchaseMode.LIVE, "on": PurchaseMode.LIVE,
+}
+
+
 class Phase(str, Enum):
     """轮询节奏档位。"""
 

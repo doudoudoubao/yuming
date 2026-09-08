@@ -62,6 +62,7 @@ class StubController:
     async def cmd_log(self, n): self.calls.append(("log", n)); return "LOG"
     async def cmd_tlds(self, name): self.calls.append(("tlds", name)); return "TLDS"
     async def cmd_auto(self, d, v): self.calls.append(("auto", d, v)); return "AUTO"
+    async def cmd_mode(self, v, c): self.calls.append(("mode", v, c)); return "MODE"
 
 
 # ------------------------------------------------------------------- 客户端
@@ -706,8 +707,9 @@ def test_help_purchase_defaults_are_described_correctly():
     assert config.purchase.dry_run is True
 
     text = HELP_SECTIONS["抢注"]
-    assert "只监控只推送" in text          # 默认不下单
-    assert "演练模式" in text              # dry_run 的中文说法
+    assert "仅监控" in text                # 出厂默认
+    assert "演练" in text
+    assert "/mode" in text                 # 告诉用户怎么切
 
 
 async def test_messages_show_chinese_domains_not_punycode():
@@ -768,3 +770,36 @@ async def test_auto_without_domain_shows_usage():
 
     assert controller.calls == []
     assert "用法" in recorder.sent[0]["text"]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/mode", ("mode", None, False)),
+        ("/mode 演练", ("mode", "演练", False)),
+        ("/mode 真实", ("mode", "真实", False)),
+        ("/mode 真实 确认", ("mode", "真实", True)),
+        ("/mode live confirm", ("mode", "live", True)),
+        ("/模式 监控", ("mode", "监控", False)),
+    ],
+)
+async def test_mode_command_routing(text, expected):
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    controller = StubController()
+    bot = TelegramBot(client, config, controller)
+
+    await bot._dispatch(make_message(text))
+
+    assert controller.calls == [expected]
+
+
+def test_help_documents_all_three_modes():
+    """三种模式都得在 /help 里说明，否则 /mode 就是个黑盒。"""
+    from domain_monitor.models import PurchaseMode
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+
+    joined = "\n".join(HELP_SECTIONS.values())
+    for mode in PurchaseMode:
+        assert mode.label in joined, f"/help 没说明「{mode.label}」模式"
+        assert mode.emoji in joined

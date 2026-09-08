@@ -60,6 +60,7 @@ HELP_SECTIONS["命令"] = """🌐 <b>域名监控</b> · 使用说明 1/3
 /add　加入监控
 /del　移出监控
 /buy　立刻尝试注册
+/mode　查看或切换下单模式（监控 / 演练 / 真实）
 /auto　单独开关某个域名的自动下单
 /pause　暂停抢注 · /resume　恢复
 
@@ -103,10 +104,17 @@ HELP_SECTIONS["抢注"] = """🛒 使用说明 3/3 · <b>花钱规则与安全</
 凭据只写在跑本程序那台服务器的 .env 里。
 我识别到疑似密钥会拒绝处理、不写日志，并提醒你去吊销。
 
-<b>默认不会花钱</b>
-出厂设置是<b>只监控只推送</b>，绝不下单。
-要开自动抢注得改服务器上的配置，
-并且建议先用演练模式跑几天再来真的。
+<b>三种模式，随时切</b>
+🔍 仅监控　　只看不买（出厂默认）
+🧪 演练　　　走完整流程但不花钱
+💸 真实下单　真的花钱
+
+<code>/mode</code> 看当前模式，<code>/mode 演练</code> 切换。
+切到「真实」需要二次确认，且注册商必须是真的，
+不然只会让你误以为在抢。
+建议先用演练跑几天再来真的。
+服务器上可以把 allow_remote_control 关掉，
+那样就只能登服务器改配置。
 
 <b>⚠️ 开关默认是全局的</b>
 开启后，监控列表里<b>任何一个</b>变成可注册的域名都会被下单，
@@ -195,6 +203,7 @@ BOT_COMMANDS = [
     {"command": "buy", "description": "立即尝试注册"},
     {"command": "pause", "description": "暂停自动抢注"},
     {"command": "resume", "description": "恢复自动抢注"},
+    {"command": "mode", "description": "查看/切换下单模式"},
     {"command": "auto", "description": "开关某个域名的自动下单"},
     {"command": "tlds", "description": "查看后缀合集"},
     {"command": "log", "description": "最近事件"},
@@ -216,6 +225,7 @@ class Controller(Protocol):
     async def cmd_log(self, limit: int) -> str: ...
     async def cmd_tlds(self, name: str | None) -> str: ...
     async def cmd_auto(self, domain: str, value: str | None) -> str: ...
+    async def cmd_mode(self, value: str | None, confirm: bool) -> str: ...
 
 
 class TelegramClient:
@@ -518,6 +528,11 @@ class TelegramBot:
             return await self.controller.cmd_pause(True)
         if command == "resume":
             return await self.controller.cmd_pause(False)
+        if command in ("mode", "模式", "下单"):
+            confirm = len(args) > 1 and args[1].strip().lower() in (
+                "确认", "confirm", "yes", "y", "是"
+            )
+            return await self.controller.cmd_mode(args[0] if args else None, confirm)
         if command in ("auto", "自动"):
             if not args:
                 return "用法：/auto &lt;域名&gt; [开|关|默认]"

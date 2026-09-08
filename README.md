@@ -260,6 +260,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 | `/buy <域名>` | 立即尝试注册 |
 | `/pause` / `/resume` | 暂停 / 恢复自动抢注（仍继续监控） |
 | `/log [数量]` | 最近事件 |
+| `/mode [监控\|演练\|真实]` | 查看或切换下单模式 |
 | `/auto <域名> [开\|关\|默认]` | 单独开关某个域名的自动下单 |
 | `/tlds [合集名]` | 查看预设的后缀合集 |
 | `/help [主题]` | 使用说明，分 3 条发送；`/help 模式`、`/help 抢注`、`/help 状态` 只看一节 |
@@ -517,6 +518,7 @@ registrars:
 | 重复购买保护 | 自动 | — | 同一域名成功买过就不会再买 |
 | 二次确认 | `purchase.confirm_via_telegram` | `false` | 下单前要在 TG 点按钮（会慢几秒） |
 | 运行时暂停 | `/pause` | — | 随时刹车，不用重启 |
+| 远程控制闸 | `purchase.allow_remote_control` | `true` | 关掉后只能登服务器改模式 |
 | 硬错误熔断 | 自动 | — | 余额不足 / 认证失败立刻停，不空转 |
 
 还有两条重要的行为约定：
@@ -580,6 +582,32 @@ prefixes:
 
 被跳过的域名**仍然会推送通知**，并附上 `/buy` 命令供你手动决定——
 不买不等于不告诉你。`/buy` 是明确指令，不受这个开关限制。
+
+### 三种模式，Telegram 里随时切
+
+```
+/mode            看当前模式
+/mode 监控       只看不买
+/mode 演练       走完整流程但不花钱
+/mode 真实 确认  真的开始下单
+```
+
+| 模式 | 行为 |
+|---|---|
+| 🔍 仅监控 | 只推送，绝不下单（出厂默认） |
+| 🧪 演练 | 走完整抢注流程，不产生真实订单 |
+| 💸 真实下单 | 真的花钱 |
+
+配置文件里的 `enabled` / `dry_run` 只是**开机默认值**，运行时的切换存在数据库里，
+重启后保持不变，`/status` 和开机通知都会显示当前模式。
+
+切到「真实」有三道关：
+1. 服务器上 `allow_remote_control` 必须是 `true`（默认是）
+2. 注册商不能是 `dryrun` 演练适配器 —— 否则只会让你误以为在抢
+3. 必须显式发 `/mode 真实 确认`，一次误触不会生效
+
+不想让 Telegram 有这个权限就把 `allow_remote_control` 设成 `false`，
+那样配置文件是唯一权威。
 
 ### 开启真实下单
 
@@ -702,7 +730,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 420 个测试，全部离线，约 11 秒
+.venv/bin/python -m pytest              # 440 个测试，全部离线，约 13 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。
