@@ -172,3 +172,27 @@ def test_version_guard_message_is_actionable():
     source = (REPO / "domain_monitor" / "__init__.py").read_text(encoding="utf-8")
     assert "3, 10" in source
     assert "apt install" in source
+
+
+def test_install_script_rejects_incomplete_checkout(tmp_path):
+    """只把 install.sh 拷出来跑、或者 clone 错分支，要给出能照做的提示。"""
+    shutil.copy(REPO / "install.sh", tmp_path / "install.sh")
+    result = subprocess.run(
+        ["bash", str(tmp_path / "install.sh"), "--yes"],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "不是完整的项目" in combined
+    assert "git clone -b" in combined          # 给出可直接照做的命令
+
+
+def test_docs_clone_commands_specify_the_branch():
+    """main 分支只有一个 README，文档里的 clone 命令必须带 -b。"""
+    for name in ("README.md", "docs/安装.md"):
+        text = (REPO / name).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "git clone" in line and "yuming.git" in line:
+                assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"
+            elif "git clone" in line:
+                assert "-b " in line, f"{name} 的 clone 命令没带分支: {line}"

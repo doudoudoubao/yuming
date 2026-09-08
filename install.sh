@@ -71,6 +71,17 @@ if [ "$HAS_TTY" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
   warn "  DM_DOMAINS='a.com b.com' DM_TG_TOKEN=xxx DM_TG_CHAT=123 ./install.sh"
 fi
 
+# 单独把 install.sh 拷出来跑、或者 clone 错分支，都会走到这里。
+# 与其让 pip 报一句看不懂的错，不如直接说清楚。
+for required in requirements.txt config.example.yaml domain_monitor/__init__.py; do
+  [ -e "$REPO_DIR/$required" ] || fail "当前目录不是完整的项目（缺 $required）。
+  请连同整个仓库一起 clone，并注意分支：
+    git clone -b claude/domain-monitor-auto-register-5z21z6 \\
+      https://github.com/doudoudoubao/yuming.git
+    cd yuming && ./install.sh
+  （main 分支只有一个 README，clone 下来是装不了的）"
+done
+
 info "检查 Python 版本（需要 ${MIN_MAJOR}.${MIN_MINOR}+）"
 PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
