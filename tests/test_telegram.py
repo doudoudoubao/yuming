@@ -206,7 +206,10 @@ async def test_help_and_unknown_commands():
     config, client = make_client(recorder)
     bot = TelegramBot(client, config, StubController())
 
-    assert "域名监控机器人" in await bot._handle_command("/help")
+    # /help 现在返回多条
+    sections = await bot._handle_command("/help")
+    assert isinstance(sections, list)
+    assert "域名监控机器人" in sections[0]
     assert "用法" in await bot._handle_command("/check")
     assert "未知命令" in await bot._handle_command("/nonsense")
 
@@ -562,3 +565,146 @@ async def test_tlds_command_routes():
     await bot._dispatch(make_message("/tlds two"))
 
     assert controller.calls == [("tlds", None), ("tlds", "two")]
+
+
+# ------------------------------------------------------------------ /help
+
+async def test_help_sends_all_sections():
+    """不带参数的 /help 要把全部规则发出来（分条，因为单条装不下）。"""
+    from domain_monitor.notify.telegram import HELP_ORDER
+
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    bot = TelegramBot(client, config, StubController())
+
+    await bot._dispatch(make_message("/help"))
+
+    assert len(recorder.sent) == len(HELP_ORDER)
+    joined = "\n".join(item["text"] for item in recorder.sent)
+    assert "/list" in joined                    # 命令
+    assert "@all" in joined                     # 批量写法
+    assert "永远不要发凭据" in joined            # 安全
+    assert "待删除" in joined                    # 状态
+
+
+async def test_every_help_section_fits_one_message():
+    """单条 Telegram 消息上限 4096，超了会被截断，规则就残缺了。"""
+    from domain_monitor.notify.telegram import HELP_SECTIONS, MAX_MESSAGE
+
+    for name, text in HELP_SECTIONS.items():
+        assert len(text) < MAX_MESSAGE, f"{name} 这节太长（{len(text)}）"
+
+
+@pytest.mark.parametrize(
+    "arg,expect",
+    [
+        ("模式", "批量写法"),
+        ("pattern", "批量写法"),
+        ("抢注", "抢注与安全"),
+        ("buy", "抢注与安全"),
+        ("安全", "抢注与安全"),
+        ("状态", "状态与推送"),
+        ("3", "抢注与安全"),
+    ],
+)
+async def test_help_topic_sends_one_section(arg, expect):
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    bot = TelegramBot(client, config, StubController())
+
+    await bot._dispatch(make_message(f"/help {arg}"))
+
+    assert len(recorder.sent) == 1
+    assert expect in recorder.sent[0]["text"]
+
+
+async def test_unknown_help_topic_lists_the_valid_ones():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    bot = TelegramBot(client, config, StubController())
+
+    await bot._dispatch(make_message("/help 不存在的主题"))
+
+    text = recorder.sent[0]["text"]
+    assert "没有" in text and "命令" in text and "模式" in text
+
+
+async def test_start_shows_help():
+    recorder = Recorder()
+    config, client = make_client(recorder)
+    bot = TelegramBot(client, config, StubController())
+
+    await bot._dispatch(make_message("/start"))
+
+    assert recorder.sent
+
+
+def test_help_documents_every_command():
+    """新加了命令却忘了写进 /help，用户就发现不了——这里钉住。"""
+    from domain_monitor.notify.telegram import BOT_COMMANDS, HELP_SECTIONS
+
+    joined = "\n".join(HELP_SECTIONS.values())
+    for entry in BOT_COMMANDS:
+        assert f"/{entry['command']}" in joined, f"/help 没提到 /{entry['command']}"
+
+
+def test_help_mentions_every_tld_group():
+    """合集名变了但 /help 没跟着改，用户照着打就会报错。"""
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+    from domain_monitor.tldgroups import PRIMARY_GROUPS
+
+    joined = "\n".join(HELP_SECTIONS.values())
+    for name in PRIMARY_GROUPS:
+        assert f"@{name}" in joined, f"/help 没提到 @{name}"
+
+
+def test_help_states_match_the_model():
+    """状态说明得和实际的状态标签对得上。"""
+    from domain_monitor.models import DomainState
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+
+    text = HELP_SECTIONS["状态"]
+    for state in (DomainState.REGISTERED, DomainState.EXPIRED, DomainState.REDEMPTION,
+                  DomainState.PENDING_DELETE, DomainState.AVAILABLE, DomainState.ACQUIRED):
+        assert state.label in text, f"状态说明缺了「{state.label}」"
+        assert state.emoji in text, f"状态说明缺了 {state.label} 的图标"
+
+
+def test_help_numbers_match_the_real_defaults():
+    """/help 里写死的数字必须和真实默认值一致。
+
+    改了默认值却忘了同步文案，用户就会照着错的说明去配置。
+    """
+    from domain_monitor.config import load_config
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+    from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS
+
+    config = load_config(data={})
+    text = "\n".join(HELP_SECTIONS.values())
+
+    expected = {
+        f"{len(BUILTIN_TLD_GROUPS['all'])} 个": "@all 的数量",
+        f"{len(BUILTIN_TLD_GROUPS['two'])} 个": "@two 的数量",
+        f"{len(BUILTIN_TLD_GROUPS['gtld'])} 个": "@gtld 的数量",
+        f"{config.pattern_limit} 个": "pattern_limit",
+        f"{int(config.poll.idle_interval // 3600)} 小时": "常规轮询间隔",
+        f"{int(config.poll.watch_interval // 60)} 分钟": "删除流程轮询间隔",
+        f"{int(config.lifecycle.default.grace_days)} 天": "续费宽限期",
+        f"{int(config.lifecycle.default.pending_delete_days)} 天": "pendingDelete 时长",
+    }
+    for token, what in expected.items():
+        assert token in text, f"/help 里的{what}和实际默认值对不上（应含「{token}」）"
+
+
+def test_help_purchase_defaults_are_described_correctly():
+    """默认「不花钱」这件事必须在 /help 里说清楚，且和代码一致。"""
+    from domain_monitor.config import load_config
+    from domain_monitor.notify.telegram import HELP_SECTIONS
+
+    config = load_config(data={})
+    assert config.purchase.enabled is False
+    assert config.purchase.dry_run is True
+
+    text = HELP_SECTIONS["抢注"]
+    assert "purchase.enabled 默认 false" in text
+    assert "dry_run" in text

@@ -34,26 +34,136 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE = 4000  # Telegram 上限 4096，留点余量
 
-HELP_TEXT = """<b>域名监控机器人</b>
+# /help 的内容按主题拆开：单条 Telegram 消息最多 4096 字符，
+# 全部规则塞不进一条，所以 /help 分条发送，/help <主题> 只发对应那节。
+HELP_SECTIONS: dict[str, str] = {}
 
-<b>查看</b>
+HELP_SECTIONS["命令"] = """<b>📖 域名监控机器人 · 使用说明 (1/4)</b>
+
+盯住你想要的域名，一旦被释放就立刻下单注册。
+
+<b>━━ 查看 ━━</b>
 /list — 监控列表与状态
-/status — 系统运行状态与统计
-/check &lt;域名&gt; — 立即查询一个域名
-/info &lt;域名&gt; — 查看某域名的详细信息
-/log [数量] — 最近事件
-/tlds [合集名] — 查看可用的后缀合集
+/status — 运行状态、统计、今日花费
+/check &lt;域名&gt; — 立即查一个域名（不用先加监控）
+/info &lt;域名&gt; — 某个监控中域名的详情
+/log [数量] — 最近事件，默认 15 条
+/tlds [合集名] — 查看后缀合集
 
-<b>管理</b>
-直接把域名发给我就能加入监控（不用打命令）
-支持批量写法：<code>vps.{@two}</code>（两位后缀合集）、<code>a.{com,net,io}</code>
-/add &lt;域名&gt; [域名2 ...] — 加入监控
+<b>━━ 管理 ━━</b>
+/add &lt;域名&gt; ... — 加入监控
 /del &lt;域名&gt; — 移出监控
-/pause — 暂停自动抢注（仍继续监控）
+/buy &lt;域名&gt; — 立即尝试注册
+/pause — 暂停自动抢注（仍继续监控推送）
 /resume — 恢复自动抢注
-/buy &lt;域名&gt; — 立即尝试注册（需确认）
 
-/help — 显示本帮助"""
+<b>━━ 帮助 ━━</b>
+/help — 完整说明（本文，共 4 条）
+/help 模式 — 批量写法
+/help 抢注 — 抢注规则与安全闸门
+/help 状态 — 状态含义与推送说明
+
+<b>💡 最常用的：直接把域名发给我</b>
+不用打命令，整条消息只放域名即可：
+<code>mydream.com</code>
+<code>a.com b.net c.io</code>"""
+
+HELP_SECTIONS["模式"] = """<b>📖 使用说明 (2/4) · 批量写法</b>
+
+<b>━━ 花括号 ━━</b>
+<code>mydream.{com,net,io}</code> → 三个域名
+<code>{short,tiny}.com</code> → 两个前缀
+<code>{vps,host}.{com,io}</code> → 四个组合
+
+<b>━━ 后缀合集 ━━</b>
+<code>vps.{@all}</code> → 一次盯全部 58 个无限制后缀
+<code>vps.{@two}</code> → 只要 33 个两位后缀
+<code>vps.{@gtld}</code> → 只要 25 个通用后缀
+<code>vps.{@two,com,net}</code> → 合集和具体后缀混写
+
+另有两组<b>有注册限制</b>的，故意不含在 @all 里：
+<code>@europe</code> ⚠️ 多数要求当地实体或居民身份
+<code>@china</code> ⚠️ .cn 需要实名认证
+
+发 /tlds 看全部合集，/tlds all 看某个合集的完整内容。
+
+<b>━━ 抢到一个就收工 ━━</b>
+同一个前缀展开出来的域名算作一组。如果配置里开了
+stop_after_first（prefixes 段默认开），抢到组里任意一个之后，
+其余的会自动停止监控并通知你。
+「这个名字我要，哪个后缀都行」就该这么用。
+
+<b>━━ 注意数量 ━━</b>
+<code>vps.{@all}</code> 就是 58 个域名，每个都要轮询。
+一条模式最多展开 200 个（pattern_limit），超了会报错。"""
+
+HELP_SECTIONS["抢注"] = """<b>📖 使用说明 (3/4) · 抢注与安全</b>
+
+<b>━━ 🔐 永远不要发凭据给我 ━━</b>
+抢注<b>不需要</b>通过 Telegram 传任何账号、密码或 API Key。
+凭据只写在跑本程序那台服务器的 .env 文件里。
+我识别到疑似密钥会拒绝处理、不写日志，并提醒你去吊销。
+
+<b>━━ 默认不会花钱 ━━</b>
+purchase.enabled 默认 false：只监控只推送，绝不下单。
+要开自动抢注得改配置文件，并且建议先用 dry_run 演练几天。
+
+<b>━━ 花钱前的几道闸 ━━</b>
+· 单价上限 — 超过 max_price 直接放弃
+· 每日预算 — 当天累计超过 daily_budget 就停手
+· 重复购买保护 — 同一域名买到过就不会再买
+· /pause — 随时刹车，不用重启
+· 硬错误熔断 — 余额不足 / 认证失败立刻停，不空转
+· 查询失败绝不当「可注册」，只退避重试
+
+<b>━━ 抢不到热门域名 ━━</b>
+值钱的域名在释放那一刻会被专业抢注商拿走，他们握着几十上百个
+注册商通道。本程序适合<b>没人跟你抢</b>的域名：小众名字、
+个人项目名、别人忘了续费的域名 —— 这类占绝大多数。
+
+<b>━━ /buy 手动下单 ━━</b>
+需要配置里已开启 purchase.enabled，否则会拒绝。
+不在监控列表里的域名会自动先加进去。"""
+
+HELP_SECTIONS["状态"] = """<b>📖 使用说明 (4/4) · 状态与推送</b>
+
+<b>━━ 域名的一生 ━━</b>
+🔒 已注册 → ⏰ 已过期(宽限期) → 🩹 赎回期
+→ 🔥 待删除 → 🟢 可注册 → 🎉 已抢注
+
+gTLD 标准流程：到期后 45 天续费宽限期，30 天赎回期，
+5 天 pendingDelete，然后释放。
+❔ 未知 = 还没查过　⚠️ 查询失败 = RDAP 出错，会自动重试
+
+<b>━━ 什么时候查得勤 ━━</b>
+平时 6 小时一次；进入删除流程 30 分钟一次；
+临近预测释放 1 分钟一次；最后 5 分钟用 DNS 高频探测。
+预测释放时间从 pendingDelete 起点推算，误差在小时级。
+
+<b>━━ 你会收到哪些推送 ━━</b>
+· 状态变化（可注册、待删除会震手机，其余静音）
+· 🟢 域名可以注册了
+· 🎉 抢注成功 / ❌ 抢注失败
+· 🧹 同组已抢到，其余停止监控
+· ⚠️ 疑似误报、预算拦截、通道停用等
+
+<b>━━ 误报怎么处理的 ━━</b>
+一个还在正常注册期的域名突然查不到，更可能是服务器抽风。
+这种可疑跳变会自动复核一次再当真。
+走完删除流程掉出来的属于预期内，不复核、立刻抢。"""
+
+HELP_ORDER = ["命令", "模式", "抢注", "状态"]
+
+# 主题别名，中英文都认
+HELP_ALIASES = {
+    "命令": "命令", "commands": "命令", "cmd": "命令", "1": "命令",
+    "模式": "模式", "pattern": "模式", "patterns": "模式", "批量": "模式", "2": "模式",
+    "抢注": "抢注", "buy": "抢注", "购买": "抢注", "安全": "抢注", "3": "抢注",
+    "状态": "状态", "state": "状态", "status": "状态", "推送": "状态", "4": "状态",
+}
+
+# 兼容旧引用
+HELP_TEXT = HELP_SECTIONS["命令"]
 
 BOT_COMMANDS = [
     {"command": "list", "description": "监控列表与状态"},
@@ -67,7 +177,7 @@ BOT_COMMANDS = [
     {"command": "resume", "description": "恢复自动抢注"},
     {"command": "tlds", "description": "查看后缀合集"},
     {"command": "log", "description": "最近事件"},
-    {"command": "help", "description": "帮助"},
+    {"command": "help", "description": "完整使用说明"},
 ]
 
 
@@ -345,16 +455,19 @@ class TelegramBot:
             reply = await self._handle_command(text)
         else:
             reply = await self._handle_plain_text(text)
-        if reply:
-            await self.client.send(reply, chat_id=chat_id)
 
-    async def _handle_command(self, text: str) -> str:
+        # /help 会返回多条（单条 Telegram 消息装不下全部规则）
+        for message in [reply] if isinstance(reply, str) else reply:
+            if message:
+                await self.client.send(message, chat_id=chat_id)
+
+    async def _handle_command(self, text: str) -> str | list[str]:
         parts = text.split()
         command = parts[0].lstrip("/").split("@", 1)[0].lower()
         args = parts[1:]
 
-        if command in ("start", "help"):
-            return HELP_TEXT
+        if command in ("start", "help", "帮助", "说明"):
+            return self._help(args)
         if command == "list":
             return await self.controller.cmd_list()
         if command == "status":
@@ -437,6 +550,23 @@ class TelegramBot:
                 f"<code>/add {escape_html(' '.join(maybe))}</code>"
             )
         return hint
+
+    @staticmethod
+    def _help(args: list[str]) -> str | list[str]:
+        """不带参数就把全部规则分条发出来，带主题只发那一节。"""
+        if not args:
+            return [HELP_SECTIONS[key] for key in HELP_ORDER]
+
+        wanted = args[0].strip().lower().lstrip("/")
+        key = HELP_ALIASES.get(wanted)
+        if key is None:
+            topics = "、".join(HELP_ORDER)
+            return (
+                f"没有「{escape_html(args[0])}」这个主题。\n"
+                f"可选：{topics}\n"
+                f"直接发 /help 查看全部。"
+            )
+        return HELP_SECTIONS[key]
 
     # ---------------------------------------------------------------- 二次确认
 

@@ -226,7 +226,12 @@ export TG_CHAT_ID="你的user_id"
 python -m domain_monitor test        # 会给你发一条测试消息
 ```
 
-### 3. 直接发域名就能加监控
+### 3. 完整规则都在 `/help` 里
+
+机器人里发 `/help` 会把全部使用规则分 4 条发给你（命令 / 批量写法 / 抢注与安全 / 状态与推送），
+不用回来翻文档。只想看某一节就 `/help 模式`、`/help 抢注`、`/help 状态`。
+
+### 4. 直接发域名就能加监控
 
 不用打命令，把域名扔给机器人就行，一次发多个也可以：
 
@@ -242,7 +247,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 > 机器人识别到疑似密钥会拒绝处理、不写日志、并提醒你去吊销——
 > 但最好的做法是根本别发。凭据只写在跑本程序那台服务器的环境变量里。
 
-### 4. 能用的命令
+### 5. 能用的命令
 
 | 命令 | 作用 |
 |------|------|
@@ -256,6 +261,7 @@ python -m domain_monitor test        # 会给你发一条测试消息
 | `/pause` / `/resume` | 暂停 / 恢复自动抢注（仍继续监控） |
 | `/log [数量]` | 最近事件 |
 | `/tlds [合集名]` | 查看预设的后缀合集 |
+| `/help [主题]` | 完整使用说明，分 4 条发送；`/help 模式`、`/help 抢注`、`/help 状态` 只看一节 |
 
 > 通过 `/add` 加的域名存在数据库里，**不会**被配置文件的同步覆盖掉；
 > 只有配置文件里删掉的域名才会被清理。
@@ -638,7 +644,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 360 个测试，全部离线，约 8 秒
+.venv/bin/python -m pytest              # 376 个测试，全部离线，约 8 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。
