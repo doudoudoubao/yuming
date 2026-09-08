@@ -94,6 +94,7 @@ telegram:
   chat_id: "${TG_CHAT_ID}"            # 找 @userinfobot 拿你的 id
   allowed_user_ids: []                # 只允许这些 user id 发命令；留空则只认 chat_id
   commands: true                      # 开启 /add /list /buy 等双向命令（也支持直接发域名）
+  api_base: "${TG_API_BASE:-https://api.telegram.org}"   # 走镜像/反代时在 .env 里设 TG_API_BASE
   poll_timeout: 30
   allow_secret_input: false # 允许在聊天里用 /setkey 写注册商凭据吗？
                             # 默认关闭：密钥会留在 Telegram 聊天记录里

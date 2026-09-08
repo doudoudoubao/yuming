@@ -847,7 +847,7 @@ domain_monitor/
 ```bash
 ./install.sh --yes
 .venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest              # 440 个测试，全部离线，约 13 秒
+.venv/bin/python -m pytest              # 518 个测试，全部离线，约 13 秒
 ```
 
 测试用 `httpx.MockTransport` 顶掉所有网络调用，不碰真实注册商、不发真实 TG 消息。

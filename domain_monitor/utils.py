@@ -10,7 +10,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -380,6 +380,43 @@ def escape_html(text: Any) -> str:
 
 def truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def fit_lines(
+    head: Sequence[str],
+    items: Sequence[str],
+    limit: int,
+    more: str,
+    *,
+    max_items: int | None = None,
+) -> str:
+    """把 ``head`` + ``items`` 拼成一条不超过 ``limit`` 字符的消息。
+
+    Telegram 单条消息有硬上限，超了会被拦腰截断——正好把 HTML 标签切开，
+    整条消息就渲染不出来。所以宁可少列几条，也要在条目边界上停下，
+    再用 ``more``（含 ``{n}`` 的模板，如 ``"… 还有 {n} 条"``）交代掉剩下的。
+
+    ``max_items`` 是额外的条数上限：刷屏和超长是两回事，30 条短域名读着舒服，
+    30 条长域名就爆了，两个闸门都要有。
+    """
+    text = "\n".join(head)
+    total = len(items)
+    # 「还有 N 条」那行也占地方，且 N 最大时最长，按最坏情况预留
+    reserve = len("\n" + more.format(n=total)) if total else 0
+    budget = total if max_items is None else min(total, max_items)
+
+    kept = 0
+    for index in range(budget):
+        addition = ("\n" if text else "") + items[index]
+        last = index == total - 1
+        if len(text) + len(addition) + (0 if last else reserve) > limit:
+            break
+        text += addition
+        kept += 1
+
+    if kept < total:
+        text += "\n" + more.format(n=total - kept)
+    return text
 
 
 def display_width(text: str) -> int:

@@ -32,7 +32,7 @@ from .models import (
     estimate_drop_time,
     source_label,
 )
-from .notify.telegram import Notifier, NullBot
+from .notify.telegram import MAX_MESSAGE, Notifier, NullBot
 from .rdap import RdapClient
 from .registrars.base import Registrar
 from .registrars.pool import RegistrarPool
@@ -44,6 +44,7 @@ from .utils import (
     display_domain,
     escape_html,
     expand_patterns,
+    fit_lines,
     human_delta,
     human_until,
     is_valid_domain,
@@ -61,6 +62,23 @@ logger = logging.getLogger(__name__)
 
 PAUSED_KEY = "purchase_paused"
 MODE_KEY = "purchase_mode"
+
+
+def _inline_list(prefix: str, items: list[str], *, code: bool, limit: int = 8) -> str:
+    """把一串域名压成一行。
+
+    一次 <code>vps.{@all}</code> 就能带来几十上百个域名，逐个列出既刷屏
+    又可能撑爆单条消息，所以只列前几个，剩下报个数。
+    """
+    shown = [
+        f"<code>{escape_html(truncate(item, 60))}</code>" if code
+        else escape_html(truncate(item, 60))
+        for item in items[:limit]
+    ]
+    text = prefix + "、".join(shown)
+    if len(items) > limit:
+        text += f" …… 等 {len(items)} 个"
+    return text
 
 
 class Engine:
@@ -90,9 +108,16 @@ class Engine:
         self._stop = asyncio.Event()
         self._sprints: dict[str, asyncio.Task[None]] = {}
         self._acquiring: set[str] = set()
+        # 已经提醒过「可注册但买不了」的域名 → 理由。同一理由只说一次，
+        # 否则域名一直停在可注册状态时会被刷屏。
+        self._announced: dict[str, str] = {}
         # 当日成交名额的「在途占位」。并发抢注时光查数据库会全部读到 0，
         # 于是一起放行——必须在放行的那一刻同步占位。
         self._inflight_purchases = 0
+        # 下单模式的缓存，避免每次读取都查一次数据库
+        self._mode_cache: PurchaseMode | None = None
+        self._purchase_cache: Any = None
+        self._mode_downgrade_warned: str | None = None
         self._semaphore = asyncio.Semaphore(config.poll.concurrency)
         self.started_at = utcnow()
 
@@ -111,24 +136,85 @@ class Engine:
 
     # ------------------------------------------------------------ 下单模式与暂停
 
+    def live_blocked_reason(self) -> str | None:
+        """真实下单是否被阻止；返回原因，None 表示允许。
+
+        运行时模式存在数据库里、会跨重启保留，所以每次读取都要重新对着
+        当前配置校验一遍——否则「把 provider 改回 dryrun / 清空凭据」
+        这些正规的关停手段会被一个陈旧的 KV 值架空。
+        """
+        from .registrars import PROVIDERS, env_var_name
+
+        for entry in self.config.registrar_configs:
+            provider = (entry.provider or "dryrun").lower()
+            if provider in ("", "dryrun"):
+                return "注册商是 dryrun 演练适配器，下不了真实订单"
+            adapter = PROVIDERS.get(provider)
+            if adapter is None:
+                continue
+            missing = [
+                option for option in adapter.required_options
+                if not str(entry.options.get(option) or "").strip()
+            ]
+            if missing:
+                names = "、".join(env_var_name(provider, item) for item in missing)
+                return f"{provider} 的凭据没填齐（缺 {names}）"
+            if adapter.needs_contact and not entry.contact:
+                return f"{provider} 下单需要注册人资料，但 contact 是空的"
+        return None
+
     @property
     def purchase_mode(self) -> PurchaseMode:
-        """当前生效的下单模式。运行时覆盖优先，没有就按配置推导。"""
+        """当前生效的下单模式。运行时覆盖优先，但不得超出配置允许的范围。"""
+        if self._mode_cache is not None:
+            return self._mode_cache
+
         override = self.storage.get_kv(MODE_KEY)
+        mode: PurchaseMode | None = None
         try:
-            return PurchaseMode(override)
+            mode = PurchaseMode(override)
         except ValueError:
-            pass
-        # 这里必须读**原始配置**：self.purchase 反过来依赖本方法，
-        # 用有效值会变成无限递归。
-        if not self.config.purchase.enabled:
-            return PurchaseMode.MONITOR
-        if self.config.purchase.dry_run:
-            return PurchaseMode.DRYRUN
-        return PurchaseMode.LIVE
+            mode = None
+
+        if mode is None:
+            # 这里必须读**原始配置**：self.purchase 反过来依赖本方法，
+            # 用有效值会变成无限递归。
+            if not self.config.purchase.enabled:
+                mode = PurchaseMode.MONITOR
+            elif self.config.purchase.dry_run:
+                mode = PurchaseMode.DRYRUN
+            else:
+                mode = PurchaseMode.LIVE
+
+        if mode is PurchaseMode.LIVE:
+            blocked = self.live_blocked_reason()
+            if blocked:
+                if self._mode_downgrade_warned != blocked:
+                    self._mode_downgrade_warned = blocked
+                    logger.error(
+                        "运行时模式是「真实下单」，但当前配置不允许（%s），已降级为演练",
+                        blocked,
+                    )
+                    self.storage.add_event(
+                        "mode_downgraded",
+                        message=f"真实下单被降级为演练：{blocked}",
+                        level="error",
+                    )
+                mode = PurchaseMode.DRYRUN
+
+        self._mode_cache = mode
+        return mode
 
     def set_purchase_mode(self, mode: PurchaseMode) -> None:
         self.storage.set_kv(MODE_KEY, mode.value)
+        self.invalidate_mode_cache()
+
+    def invalidate_mode_cache(self) -> None:
+        """配置或模式变了就丢掉缓存。"""
+        self._mode_cache = None
+        self._purchase_cache = None
+        self._mode_downgrade_warned = None
+        self._announced.clear()
 
     @property
     def purchase(self):
@@ -136,13 +222,18 @@ class Engine:
 
         引擎内部一律用这个而不是 config.purchase，否则在 Telegram 里
         切了模式，代码还在按配置文件的旧值走。
+
+        结果缓存：这个属性在每轮巡检里会被读几十上百次，
+        每次都查一遍 SQLite + 造一个 dataclass 太浪费。
         """
-        mode = self.purchase_mode
-        return replace(
-            self.config.purchase,
-            enabled=mode is not PurchaseMode.MONITOR,
-            dry_run=mode is not PurchaseMode.LIVE,
-        )
+        if self._purchase_cache is None:
+            mode = self.purchase_mode
+            self._purchase_cache = replace(
+                self.config.purchase,
+                enabled=mode is not PurchaseMode.MONITOR,
+                dry_run=mode is not PurchaseMode.LIVE,
+            )
+        return self._purchase_cache
 
     @property
     def paused(self) -> bool:
@@ -150,6 +241,8 @@ class Engine:
 
     def set_paused(self, value: bool) -> None:
         self.storage.set_kv(PAUSED_KEY, bool(value))
+        # 「买不了」的理由变了，去重记录作废，下次该提醒还得提醒
+        self._announced.clear()
 
     def stop(self) -> None:
         self._stop.set()
@@ -310,8 +403,16 @@ class Engine:
             )
 
         if status.state == DomainState.AVAILABLE:
-            await self._on_available(watched.domain, reason="RDAP 查询显示可注册")
+            # confirmed 只在「这一轮刚变成可注册」时为真，避免域名长期
+            # 停在可注册状态时每轮都推一条
+            await self._on_available(
+                watched.domain,
+                reason="RDAP 查询显示可注册",
+                confirmed=status.state != previous,
+            )
         else:
+            # 域名又不可注册了：清掉去重记录，下次真的掉下来时还要提醒
+            self._announced.pop(watched.domain, None)
             self._sync_sprint(watched.domain, phase, drop_at)
 
     async def _trust_available(
@@ -554,6 +655,18 @@ class Engine:
 
     # -------------------------------------------------------------------- 抢注
 
+    def _announce_once(self, domain: str, kind: str) -> bool:
+        """同一个域名、同一种「买不了」的理由只提醒一次。
+
+        域名可以在可注册状态停很久，每轮巡检都推就成了刷屏；冲刺阶段
+        每 0.5 秒探一次，一分钟能发一百多条，Telegram 直接限流。
+        理由变了（比如从「没开自动下单」变成「已暂停」）才再说一次。
+        """
+        if self._announced.get(domain) == kind:
+            return False
+        self._announced[domain] = kind
+        return True
+
     async def _on_available(
         self, domain: str, *, reason: str, confirmed: bool = True, fast: bool = False
     ) -> bool:
@@ -572,28 +685,32 @@ class Engine:
             await self.notifier.available(domain, reason)
 
         if not self.purchase.enabled:
-            logger.warning("%s 可注册，但没开启下单功能，仅通知", domain)
+            if self._announce_once(domain, "purchase_off"):
+                logger.warning("%s 可注册，但没开启下单功能，仅通知", domain)
             return False
 
         # 逐个域名的开关。全局开关只决定「能不能买」，
         # 这里决定「这一个要不要买」——盯一批后缀但只想抢其中一个时用得上。
         if not self.auto_buy_allowed(watched):
-            logger.warning("%s 可注册，但该域名未开启自动下单", domain)
-            self.storage.add_event(
-                "auto_buy_skipped", domain=domain,
-                message="该域名未开启自动下单，仅通知", level="warning",
-            )
-            await self.notifier.send(
-                f"🔔 <b>{escape_html(display_domain(domain))}</b> 可以注册了\n"
-                f"这个域名没开自动下单，要买请发 "
-                f"<code>/buy {escape_html(display_domain(domain))}</code>"
-            )
+            logger.info("%s 可注册，但该域名未开启自动下单", domain)
+            if self._announce_once(domain, "no_auto_buy"):
+                self.storage.add_event(
+                    "auto_buy_skipped", domain=domain,
+                    message="该域名未开启自动下单，仅通知", level="warning",
+                )
+                await self.notifier.send(
+                    f"🔔 <b>{escape_html(display_domain(domain))}</b> 可以注册了\n"
+                    f"这个域名没开自动下单，要买请发 "
+                    f"<code>/buy {escape_html(display_domain(domain))}</code>"
+                )
             return False
         if self.paused:
-            logger.warning("%s 可注册，但抢注已被 /pause 暂停", domain)
-            await self.notifier.send(
-                f"⏸ <b>{escape_html(domain)}</b> 可注册，但抢注处于暂停状态（/resume 恢复）"
-            )
+            logger.info("%s 可注册，但抢注已被 /pause 暂停", domain)
+            if self._announce_once(domain, "paused"):
+                await self.notifier.send(
+                    f"⏸ <b>{escape_html(display_domain(domain))}</b> 可注册，"
+                    f"但抢注处于暂停状态（/resume 恢复）"
+                )
             return False
 
         self._acquiring.add(domain)
@@ -953,7 +1070,8 @@ class Engine:
             lines[0] += f"（在盯 {len(active)}）"
         lines.append("")
 
-        for item in domains[:30]:
+        rows: list[str] = []
+        for item in domains:
             tail = ""
             if item.drop_at:
                 tail = f"　{human_until(item.drop_at)}释放"
@@ -964,13 +1082,11 @@ class Engine:
             cart = ""
             if self.purchase.enabled and item.enabled:
                 cart = "🛒" if self.auto_buy_allowed(item) else "🔕"
-            lines.append(
+            rows.append(
                 f"{item.state.emoji}{cart} <code>{escape_html(display_domain(item.domain))}</code>"
                 f"{tail}{flag}"
             )
-        if len(domains) > 30:
-            lines.append(f"\n… 还有 {len(domains) - 30} 个")
-        return "\n".join(lines)
+        return fit_lines(lines, rows, MAX_MESSAGE, "\n… 还有 {n} 个", max_items=30)
 
     async def cmd_status(self) -> str:
         stats = self.storage.stats()
@@ -1134,12 +1250,11 @@ class Engine:
                 lines.append("✅ 已加入监控：\n" + "\n".join(
                     f"<code>{escape_html(item)}</code>" for item in added
                 ))
+        # skipped / invalid 也可能一次来几百条（pattern_limit 默认 200），同样要收着列
         if skipped:
-            lines.append("ℹ️ 已在监控中：" + "、".join(
-                f"<code>{escape_html(item)}</code>" for item in skipped
-            ))
+            lines.append(_inline_list("ℹ️ 已在监控中：", skipped, code=True))
         if invalid:
-            lines.append("❌ 非法域名：" + "、".join(escape_html(item) for item in invalid))
+            lines.append(_inline_list("❌ 非法域名：", invalid, code=False))
         return "\n\n".join(lines) or "没有可添加的域名"
 
     @property
@@ -1191,6 +1306,7 @@ class Engine:
         task = self._sprints.pop(name, None)
         if task is not None and not task.done():
             task.cancel()
+        self._announced.pop(name, None)
         if self.storage.remove_domain(name):
             self.storage.add_event("removed", domain=name, message="经 Telegram 移出监控")
             return f"🗑 已移出监控：<code>{escape_html(name)}</code>"
@@ -1228,6 +1344,7 @@ class Engine:
             return f"看不懂「{escape_html(value)}」，请用 开 / 关 / 默认"
 
         self.storage.set_auto_buy(name, target)
+        self._announced.pop(name, None)
         self.storage.add_event(
             "auto_buy_changed", domain=name,
             message=f"自动下单设为 {'开' if target else ('关' if target is False else '跟随全局')}",
@@ -1404,12 +1521,12 @@ class Engine:
 
         # 切到真实下单要过两道额外的关
         if target is PurchaseMode.LIVE:
-            fake = [item.label for item in self.pool if item.name == "dryrun"]
-            if fake:
+            blocked = self.live_blocked_reason()
+            if blocked:
                 return (
-                    "❌ 当前注册商是 <code>dryrun</code> 演练适配器，切成真实下单没有意义"
-                    "（下不了单，只会让你误以为在抢）。\n"
-                    "请先在服务器上配置真实的注册商。"
+                    f"❌ 现在还不能切到真实下单：{escape_html(blocked)}\n\n"
+                    f"切过去也抢不到，只会让你误以为在抢。\n"
+                    f"填法见服务器上执行 <code>domain-monitor registrar</code>。"
                 )
             if not confirm:
                 return (
@@ -1457,12 +1574,14 @@ class Engine:
         if not events:
             return "暂无事件记录"
         icons = {"error": "❌", "warning": "⚠️", "info": "·"}
-        lines = [f"📜 <b>最近 {len(events)} 条事件</b>", ""]
+        head = [f"📜 <b>最近 {len(events)} 条事件</b>", ""]
+        rows = []
         for event in events:
             icon = icons.get(event.level, "·")
             target = f" <code>{escape_html(event.domain)}</code>" if event.domain else ""
-            lines.append(
+            rows.append(
                 f"{icon} <i>{to_utc(event.created_at):%m-%d %H:%M}</i>{target}\n"
                 f"　　{escape_html(truncate(event.message, 120))}"
             )
-        return "\n".join(lines)
+        # 单条截到 120 字还不够：30 条加起来照样超过 Telegram 的上限
+        return fit_lines(head, rows, MAX_MESSAGE, "\n… 更早的 {n} 条没列出")

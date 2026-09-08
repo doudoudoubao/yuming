@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # 免得把 PATH 之类的系统变量也一起动了。
 _RELOADABLE_ENV = {
     name for names in credential_env_vars().values() for name in names
-} | {"TG_CHAT_ID"}
+} | {"TG_CHAT_ID", "TG_BOT_TOKEN", "TG_API_BASE"}
 
 
 class Application:
@@ -136,20 +136,23 @@ class Application:
 
         # .env 里的新值要能盖掉进程里已有的旧值，否则读不到刚写的密钥
         before = dict(os.environ)
+        restore = True
         try:
             for name in list(os.environ):
                 if name in _RELOADABLE_ENV:
                     del os.environ[name]
             load_env_files(self.config.path)
             fresh = load_config(self.config.path)
-        except ConfigError as exc:
-            os.environ.clear()
-            os.environ.update(before)
+            restore = False
+        except Exception as exc:  # noqa: BLE001
+            # 必须兜住所有异常：只认 ConfigError/OSError 的话，
+            # YAML 语法错误会让删掉的凭据永远回不来，
+            # 下一次成功重载就会带着空凭据把通道建起来
             return f"❌ 配置有误，已保持原样：{exc}"
-        except OSError as exc:
-            os.environ.clear()
-            os.environ.update(before)
-            return f"❌ 读取配置失败：{exc}"
+        finally:
+            if restore:
+                os.environ.clear()
+                os.environ.update(before)
 
         old_pool = self.pool
         try:
@@ -165,6 +168,14 @@ class Application:
         self.pool = pool
         self.engine.config = fresh
         self.engine.registrar = pool
+        self.engine.invalidate_mode_cache()   # 新配置可能改变模式的允许范围
+
+        # Telegram 的配置也得换掉，否则改了 chat_id / 白名单 / 密钥输入开关
+        # 之后重载会报成功，实际全是旧值
+        self.telegram.config = fresh.telegram
+        self.notifier.config = fresh.telegram
+        if hasattr(self.bot, "config"):
+            self.bot.config = fresh.telegram
         await old_pool.close()
 
         added, removed = self.storage.sync_config_domains(fresh.domains)
@@ -210,10 +221,13 @@ class Application:
 
     async def _warn_about_immediate_buys(self) -> None:
         """真实下单模式启动时，提醒哪些域名会被立刻买走。"""
+        # 只统计**真的会被买**的：白名单模式下大部分域名只通知不买，
+        # 全报出来等于狼来了
         already = [
             item.domain
             for item in self.storage.list_domains(enabled_only=True)
             if item.state is DomainState.AVAILABLE
+            and self.engine.auto_buy_allowed(item)
         ]
         if not already:
             return

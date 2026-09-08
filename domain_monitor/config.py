@@ -393,6 +393,9 @@ def _build_prefixes(
         if not isinstance(item, dict):
             raise ConfigError(f"prefixes[{index}] 必须是映射(mapping)")
         entry = _build(PrefixEntry, item, f"prefixes[{index}]")
+        # _build 不做标量类型检查，auto_buy 写成 "false" 会一路带到写库时
+        # 才炸出 ValueError（而且不是 ConfigError，主程序直接崩）
+        entry.auto_buy = _optional_bool(entry.auto_buy, f"prefixes[{index}]")
 
         names = entry.name if isinstance(entry.name, list) else [entry.name]
         names = [str(n).strip().lower() for n in names if str(n).strip()]
@@ -462,7 +465,12 @@ def load_config(path: str | Path | None = None, *, data: dict[str, Any] | None =
             raise ConfigError(f"配置文件不存在: {file_path}")
         import yaml  # 延迟导入，方便只跑单测的场景
 
-        loaded = yaml.safe_load(file_path.read_text(encoding="utf-8"))
+        try:
+            loaded = yaml.safe_load(file_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            # 必须转成 ConfigError：调用方只认这个异常，
+            # 否则 YAML 写错时会带着 traceback 崩掉且不发告警
+            raise ConfigError(f"配置文件 YAML 语法有误: {exc}") from exc
         if loaded is None:
             loaded = {}
         if not isinstance(loaded, dict):

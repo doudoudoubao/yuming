@@ -156,7 +156,12 @@ class Storage:
         stop_after_first: bool = False,
         auto_buy: bool | None = None,
     ) -> bool:
-        """加入监控列表，返回 True 表示是新增（而不是更新）。"""
+        """加入监控列表，返回 True 表示是新增（而不是更新）。
+
+        更新时**不会**把 enabled 改回 1：同组抢到后被主动停掉的域名
+        不该因为一次配置同步 / reload 就复活，否则会被重新买一遍。
+        要恢复请用 set_enabled()。
+        """
         now = iso(utcnow())
         with self._lock:
             existing = self._conn.execute(
@@ -170,8 +175,7 @@ class Storage:
                            note             = COALESCE(?, note),
                            group_name       = COALESCE(?, group_name),
                            stop_after_first = ?,
-                           auto_buy         = COALESCE(?, auto_buy),
-                           enabled          = 1
+                           auto_buy         = COALESCE(?, auto_buy)
                      WHERE domain = ?""",
                     (max_price, years, note, group, 1 if stop_after_first else 0,
                      None if auto_buy is None else int(auto_buy), domain),

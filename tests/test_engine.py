@@ -1319,7 +1319,13 @@ async def test_mode_switch_changes_effective_settings(rdap_server, storage):
     """切了模式，引擎实际用的值要跟着变——不能还按配置文件的旧值走。"""
     from domain_monitor.models import PurchaseMode
 
+    from tests.test_pool import FakeRegistrar
+
     engine = build_engine(rdap_server, storage, purchase={"enabled": False})
+    # 切 LIVE 需要真实注册商，否则会被安全降级
+    attach_pool(engine, FakeRegistrar("namesilo"))
+    engine.config.registrar.provider = "namesilo"
+    engine.config.registrar.options = {"api_key": "k"}
     assert engine.purchase.enabled is False
 
     engine.set_purchase_mode(PurchaseMode.DRYRUN)
@@ -1349,6 +1355,8 @@ async def test_switching_to_live_requires_confirmation(rdap_server, storage):
 
     engine = build_engine(rdap_server, storage, purchase={"enabled": False})
     attach_pool(engine, FakeRegistrar("namesilo"))
+    engine.config.registrar.provider = "namesilo"
+    engine.config.registrar.options = {"api_key": "k"}
 
     reply = await engine.cmd_mode("真实")
     assert "确认" in reply
@@ -1523,3 +1531,54 @@ async def test_notify_only_domain_still_gets_state_updates(rdap_server, storage)
 
     assert storage.get_domain("watch.com").state is DomainState.PENDING_DELETE
     assert "state_change" in [event.kind for event in storage.recent_events(10)]
+
+
+def capture_pushes(engine) -> list[str]:
+    """截下引擎发出的每一条推送，用来数有没有刷屏。"""
+    sent: list[str] = []
+
+    async def _send(text, **kwargs):
+        sent.append(text)
+
+    engine.notifier.send = _send
+    return sent
+
+
+class TestAvailableNotificationSpam:
+    """域名可以在可注册状态停很久，「买不了」的提醒不能每轮都推。"""
+
+    async def test_paused_notice_is_sent_once(self, rdap_server, storage):
+        engine = build_engine(rdap_server, storage,
+                              purchase={"enabled": True, "dry_run": True})
+        sent = capture_pushes(engine)
+        storage.upsert_domain("paused.com", auto_buy=True)
+        engine.set_paused(True)
+
+        for _ in range(20):
+            await engine._on_available("paused.com", reason="冲刺", confirmed=False)
+
+        assert len(sent) == 1, "冲刺阶段每 0.5 秒一条会被 Telegram 限流"
+
+    async def test_auto_buy_off_notice_is_sent_once(self, rdap_server, storage):
+        engine = build_engine(rdap_server, storage,
+                              purchase={"enabled": True, "dry_run": True})
+        sent = capture_pushes(engine)
+        storage.upsert_domain("noauto.com", auto_buy=False)
+
+        for _ in range(20):
+            await engine._on_available("noauto.com", reason="冲刺", confirmed=False)
+
+        assert len(sent) == 1
+
+    async def test_notice_returns_after_the_reason_changes(self, rdap_server, storage):
+        """理由变了要再说一次，否则用户以为问题已经解决。"""
+        engine = build_engine(rdap_server, storage,
+                              purchase={"enabled": True, "dry_run": True})
+        sent = capture_pushes(engine)
+        storage.upsert_domain("x.com", auto_buy=False)
+
+        await engine._on_available("x.com", reason="冲刺", confirmed=False)
+        engine.set_paused(True)          # 换了个理由
+        await engine._on_available("x.com", reason="冲刺", confirmed=False)
+
+        assert len(sent) == 2

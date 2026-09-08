@@ -220,13 +220,21 @@ def test_restricted_tlds_stay_out_of_all():
         assert not (set(groups[key]) & set(groups["all"])), f"@{key} 混进了 @all"
 
 
-def test_legacy_group_names_still_work():
-    """早期写法（@two-more / @classic / @常用）不该因为合并而失效。"""
+def test_legacy_group_names_keep_their_original_contents():
+    """早期组名不能静默膨胀。
+
+    @classic 从 3 个后缀悄悄变成 25 个的话，老配置在 auto_buy_default=true
+    下会凭空多出二十几个待抢域名。
+    """
     from domain_monitor.tldgroups import BUILTIN_TLD_GROUPS as groups
 
+    assert groups["classic"] == ["com", "net", "org"]
+    assert len(groups["popular"]) == 9
+    assert len(groups["startup"]) == 8
+    assert groups["常用"] == groups["popular"]
+    # 这三个是明确要求合并的，指向合并后的两位后缀全集
     assert groups["two-more"] == groups["two"]
-    assert groups["classic"] == groups["gtld"]
-    assert groups["常用"] == groups["gtld"]
+    assert groups["2"] == groups["two"]
     assert groups["全部"] == groups["all"]
 
 

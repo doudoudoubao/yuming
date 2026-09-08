@@ -8,6 +8,7 @@ from domain_monitor.utils import (
     apply_jitter,
     escape_html,
     expand_env,
+    fit_lines,
     human_delta,
     is_valid_domain,
     next_window_occurrence,
@@ -225,3 +226,35 @@ def test_display_domain_roundtrips_with_normalize():
 
     for original in ("测试.com", "例子.中国", "短域名.cn"):
         assert display_domain(normalize_domain(original)) == original
+
+
+class TestFitLines:
+    """把列表塞进一条 Telegram 消息：宁可少列，也不能被拦腰截断。"""
+
+    def test_everything_fits(self):
+        text = fit_lines(["头"], ["a", "b"], 100, "… 还有 {n} 条")
+
+        assert text == "头\na\nb"
+        assert "还有" not in text
+
+    def test_drops_items_before_exceeding_limit(self):
+        text = fit_lines([], ["x" * 10] * 10, 60, "… 还有 {n} 条")
+
+        assert len(text) <= 60
+        assert text.endswith("… 还有 6 条")
+
+    def test_reserves_room_for_the_tail(self):
+        """预留不足的话，会加到最后一条才发现「还有 N 条」放不下。"""
+        for limit in range(20, 200):
+            assert len(fit_lines(["头"], ["y" * 7] * 20, limit, "… 还有 {n} 条")) <= limit
+
+    def test_max_items_caps_the_count_too(self):
+        """短条目不会超长，但列 200 条一样是刷屏。"""
+        text = fit_lines([], [str(index) for index in range(200)], 4000,
+                         "… 还有 {n} 条", max_items=30)
+
+        assert text.count("\n") == 30  # 30 条 + 尾巴
+        assert text.endswith("… 还有 170 条")
+
+    def test_no_items(self):
+        assert fit_lines(["头"], [], 100, "… 还有 {n} 条") == "头"

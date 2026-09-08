@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from domain_monitor.config import TelegramConfig
+from domain_monitor.config import TelegramConfig, load_config
 from domain_monitor.models import DomainState
 from domain_monitor.notify.telegram import (
     Notifier,
@@ -803,3 +803,28 @@ def test_help_documents_all_three_modes():
     for mode in PurchaseMode:
         assert mode.label in joined, f"/help 没说明「{mode.label}」模式"
         assert mode.emoji in joined
+
+
+async def test_timeout_follows_reloaded_config():
+    """热重载调大 poll_timeout 后，长轮询不能再被建客户端时的旧超时掐断。"""
+    seen: list = []
+
+    def handler(request):
+        seen.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    def make(poll_timeout):
+        return load_config(data={"telegram": {
+            "enabled": True, "bot_token": "t", "chat_id": "1",
+            "timeout": 10, "poll_timeout": poll_timeout,
+        }}).telegram
+
+    client = TelegramClient(
+        make(30), client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    await client.get_updates(None)
+    client.config = make(300)          # 相当于走了一次 /reload
+    await client.get_updates(None)
+    await client.send("hi")
+
+    assert seen == [45, 315, 10]

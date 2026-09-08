@@ -70,18 +70,20 @@ BUILTIN_TLD_GROUPS: dict[str, list[str]] = {
     "两位": TWO_LETTER,
 }
 
-# 兼容早期写法，都指向合并后的组
-_ALIASES = {
-    "two-more": "two",
-    "2": "two",
-    "短": "two",
-    "classic": "gtld",
-    "popular": "gtld",
-    "startup": "gtld",
-    "常用": "gtld",
+# 兼容早期写法。这些组保留**原本的内容**，不指向合并后的大组——
+# 否则老配置里的 {@classic} 会从 3 个后缀悄悄涨到 25 个，
+# 在 auto_buy_default=true 时等于凭空多出二十几个待抢域名。
+_LEGACY_GROUPS: dict[str, list[str]] = {
+    "classic": ["com", "net", "org"],
+    "popular": ["com", "net", "org", "io", "co", "ai", "xyz", "app", "dev"],
+    "startup": ["io", "ai", "dev", "app", "tech", "xyz", "co", "sh"],
+    "常用": ["com", "net", "org", "io", "co", "ai", "xyz", "app", "dev"],
+    # 这三个是用户明确要求合并的，指向合并后的两位后缀全集
+    "two-more": TWO_LETTER,
+    "2": TWO_LETTER,
+    "短": TWO_LETTER,
 }
-for _alias, _target in _ALIASES.items():
-    BUILTIN_TLD_GROUPS[_alias] = BUILTIN_TLD_GROUPS[_target]
+BUILTIN_TLD_GROUPS.update({k: list(v) for k, v in _LEGACY_GROUPS.items()})
 
 # 需要提醒用户注意限制的组
 RESTRICTED_NOTES: dict[str, str] = {

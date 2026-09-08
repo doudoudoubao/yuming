@@ -264,7 +264,7 @@ class TelegramClient:
 
     async def start(self) -> None:
         if self._client is None:
-            # 长轮询要比 poll_timeout 多留一点余量
+            # 只是个兜底默认值，每次请求都会按当时的配置覆盖它
             timeout = max(self.config.timeout, self.config.poll_timeout + 15)
             self._client = httpx.AsyncClient(timeout=timeout)
             self._owns_client = True
@@ -289,8 +289,13 @@ class TelegramClient:
         if not self.enabled:
             return None
         url = f"{self.config.api_base}/bot{self.config.bot_token}/{method}"
+        # 超时按**当前**配置算。客户端建好时那个固定超时是热重载盲区：
+        # 调大 poll_timeout 后，长轮询会被旧超时先一步掐断。
+        timeout = self.config.timeout
+        if method == "getUpdates":
+            timeout = max(timeout, self.config.poll_timeout + 15)
         try:
-            response = await self.client.post(url, json=payload)
+            response = await self.client.post(url, json=payload, timeout=timeout)
         except httpx.HTTPError as exc:
             logger.warning("Telegram %s 请求失败: %s", method, exc)
             return None
@@ -563,10 +568,12 @@ class TelegramBot:
         else:
             reply = await self._handle_plain_text(text)
 
-        # /help 会返回多条（单条 Telegram 消息装不下全部规则）
-        for message in [reply] if isinstance(reply, str) else reply:
-            if message:
-                await self.client.send(message, chat_id=chat_id)
+        # /help 会返回多条（单条 Telegram 消息装不下全部规则）。
+        # 循环变量不能叫 message——上面那个 message 是 Telegram 的更新体，
+        # 之后再有人读它就会拿到一个字符串。
+        for part in [reply] if isinstance(reply, str) else reply:
+            if part:
+                await self.client.send(part, chat_id=chat_id)
 
     async def _handle_command(self, text: str) -> str | list[str]:
         parts = text.split()
@@ -806,9 +813,14 @@ _SECRET_COMMANDS = ("/setkey", "/密钥", "/setsecret")
 
 def _carries_a_secret(text: str) -> bool:
     """这条命令里是不是带了明文密钥（带参数才算）。"""
-    head, _, tail = text.strip().partition(" ")
-    command = head.split("@", 1)[0].lower()
-    return command in _SECRET_COMMANDS and bool(tail.strip())
+    # 必须和 _handle_command 的切分方式一致：那边用 split()（任意空白），
+    # 这边若只按空格切，制表符分隔的 /setkey 会被写入却不删消息，
+    # 明文密钥就永远留在聊天记录里了
+    parts = text.strip().split(None, 1)
+    if not parts:
+        return False
+    command = parts[0].split("@", 1)[0].lower()
+    return command in _SECRET_COMMANDS and len(parts) > 1 and bool(parts[1].strip())
 
 
 def _looks_like_secret(text: str) -> bool:

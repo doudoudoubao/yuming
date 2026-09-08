@@ -12,7 +12,7 @@ from pathlib import Path
 from . import __version__
 from .app import Application
 from .config import AppConfig, ConfigError, load_config
-from .models import DomainState
+from .models import DomainState, PurchaseMode
 from .notify.telegram import send_standalone
 from .registrars import available_providers
 from .tldgroups import RESTRICTED_NOTES, group_names
@@ -249,11 +249,17 @@ async def cmd_test(config: AppConfig) -> int:
             row("Telegram", "未启用", "-")
 
         print("\n【抢注】")
-        purchase = config.purchase
-        if not purchase.enabled:
+        # 必须读引擎的**生效模式**：运行时用 /mode 切过的话，
+        # 配置文件里的值和实际行为可能完全相反
+        purchase = app.engine.purchase
+        current = app.engine.purchase_mode
+        blocked = app.engine.live_blocked_reason()
+        if current is PurchaseMode.MONITOR:
             row("模式", "仅监控，不会下单", "-")
-        elif purchase.dry_run:
+        elif current is PurchaseMode.DRYRUN:
             row("模式", "演练，不会真的花钱", "-")
+            if blocked:
+                row("", f"（想开真实下单还差：{blocked}）", "!")
         else:
             row("模式", "⚠️  真实下单已开启", "!")
             row("单价上限", f"{purchase.max_price:.2f} {purchase.currency}")
